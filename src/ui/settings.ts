@@ -8,6 +8,7 @@ import {
 } from '../types';
 import { DEFAULT_SYSTEM_PROMPT } from '../prompts';
 import { getSettings, setSettings } from '../settings';
+import { fetchEnvDefaults, mergeEnvDefaults } from '../defaults';
 
 const LABEL_STYLE =
   'color:#7a766c;font-size:13px;align-self:center;justify-self:end;text-align:right;white-space:nowrap';
@@ -195,6 +196,46 @@ export function openSettingsModal(onClose: (newSettings: Settings) => void): voi
     onclick: () => { overlay.remove(); },
   }, ['キャンセル']);
 
+  // env デフォルトに戻す: relay の /defaults を取得 → 全フィールドを env 値に上書き
+  // (= 配布時に admin が .env で組織共通の AI URL / deploy prefix 等を設定しておけば、
+  //  個人が「リセット」したい時にいつでもここから戻せる)
+  const envResetStatus = el('span', {
+    style: 'font-size:11px;color:#7a766c;align-self:center;flex:1',
+  });
+  const btnEnvReset = el('button', {
+    style: 'padding:9px 14px;background:#fff;color:#7a766c;border:1px dashed #c0bdb0;'
+         + 'border-radius:6px;font-size:12px;cursor:pointer',
+    title: 'relay の .env で設定された組織共通デフォルト値で各フィールドを上書き (= API キーは保持)',
+    onclick: async () => {
+      envResetStatus.textContent = '⏳ relay から /defaults を取得中…';
+      envResetStatus.style.color = '#7a766c';
+      const env = await fetchEnvDefaults(relayUrlInput.value.trim() || DEFAULT_SETTINGS.relayUrl);
+      if (Object.keys(env).length === 0) {
+        envResetStatus.textContent = '✗ relay 未起動 / defaults なし';
+        envResetStatus.style.color = '#dc2626';
+        return;
+      }
+      // フォーム フィールドを env 値で上書き (= API キーは触らない)
+      const merged = mergeEnvDefaults({
+        ...DEFAULT_SETTINGS,
+        claudeApiKey: claudeKeyInput.value,  // 保持
+        corpApiKey: corpKeyInput.value,      // 保持
+        typoDomains: current.typoDomains,    // 保持
+        systemPrompt: current.systemPrompt,  // 保持
+      }, env);
+      providerSel.value = merged.provider;
+      providerSel.dispatchEvent(new Event('change', { bubbles: true }));
+      corpBaseUrlInput.value = merged.corpBaseUrl;
+      corpPrefixInput.value = merged.corpDeployPrefix;
+      corpModelSel.value = merged.corpModel;
+      claudeModelSel.value = merged.claudeModel;
+      ownDomainsInput.value = merged.ownDomains.join(', ');
+      keywordsInput.value = merged.internalKeywords.join(', ');
+      envResetStatus.textContent = '✓ env デフォルト値で上書きしました (= 保存するまで永続化されません)';
+      envResetStatus.style.color = '#065f46';
+    },
+  }, ['env デフォルトに戻す']);
+
   // ── 組み立て ────────────────────────────────────────────────────────
   modal.appendChild(el('h2', { style: 'margin:0 0 4px;font-size:18px;font-weight:700' }, ['⚙ AI 設定']));
   modal.appendChild(el('p', { style: 'margin:0 0 14px;font-size:12px;color:#7a766c;line-height:1.6' }, [
@@ -212,8 +253,13 @@ export function openSettingsModal(onClose: (newSettings: Settings) => void): voi
   modal.appendChild(blockArea);
   modal.appendChild(commonBlock);
   modal.appendChild(sysPromptBlock);
-  modal.appendChild(el('div', { style: 'display:flex;gap:10px;justify-content:flex-end;margin-top:22px' }, [
-    btnCancel, btnSave,
+  modal.appendChild(el('div', {
+    style: 'display:flex;gap:10px;align-items:center;margin-top:22px;flex-wrap:wrap',
+  }, [
+    btnEnvReset,
+    envResetStatus,
+    btnCancel,
+    btnSave,
   ]));
   overlay.appendChild(modal);
 

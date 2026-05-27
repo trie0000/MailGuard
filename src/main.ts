@@ -10,6 +10,7 @@
 import { el, clear } from './utils/dom';
 import { ParsedMail, CombinedResult } from './types';
 import { getSettings } from './settings';
+import { seedFromEnvIfFirstRun } from './defaults';
 import { createDropzone } from './ui/dropzone';
 import { renderPreview } from './ui/preview';
 import { renderResult } from './ui/result';
@@ -22,7 +23,22 @@ if (!root) throw new Error('#mailguard-root not found');
 
 let currentMail: ParsedMail | null = null;
 
-mount();
+// 起動時に組織共通デフォルトを env から seed (= 初回のみ。既存設定があれば touch しない)
+// その後 UI を mount。seed は非同期だが mount を阻害しない (= relay 未起動でもとりあえず UI 表示)。
+void (async () => {
+  try {
+    const seeded = await seedFromEnvIfFirstRun();
+    if (seeded) {
+      console.log('[mailguard] 初回起動: env デフォルト値で localStorage を初期化');
+      // seed 反映のため UI 再描画
+      mount();
+      return;
+    }
+  } catch (e) {
+    console.warn('[mailguard] env defaults seed 失敗:', (e as Error).message);
+  }
+  mount();
+})();
 
 function mount(): void {
   clear(root!);

@@ -499,6 +499,26 @@ function Handle-Request {
         return
     }
 
+    # /defaults: env で設定された組織共通デフォルトを返す (= API キーは含めない)
+    #   ブラウザは初回起動時にこれをフェッチして localStorage に seed する。
+    if ($pathLower -eq '/defaults' -and $req.HttpMethod -eq 'GET') {
+        $domains = (Get-EnvAny @('MAILGUARD_OWN_DOMAINS', 'MAILGUARD_AI_OWN_DOMAINS')).Split(',') `
+            | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+        $keywords = (Get-EnvAny @('MAILGUARD_INTERNAL_KEYWORDS', 'MAILGUARD_AI_INTERNAL_KEYWORDS')).Split(',') `
+            | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+        $defaults = [ordered]@{
+            provider          = if ($fallbackProvider) { $fallbackProvider } else { '' }
+            corpBaseUrl       = if ($fallbackUpstream) { $fallbackUpstream } else { '' }
+            corpDeployPrefix  = Get-EnvAny @('MAILGUARD_AI_DEPLOY_PREFIX')
+            corpModel         = Get-EnvAny @('MAILGUARD_AI_CORP_MODEL')
+            claudeModel       = Get-EnvAny @('MAILGUARD_AI_CLAUDE_MODEL')
+            ownDomains        = @($domains)
+            internalKeywords  = @($keywords)
+        }
+        Send-Json -Response $res -StatusCode 200 -Body ($defaults | ConvertTo-Json -Depth 10 -Compress)
+        return
+    }
+
     if ($pathLower -eq '/v1/chat/completions' -and $req.HttpMethod -eq 'POST') {
         Handle-Chat -Request $req -Response $res
         return

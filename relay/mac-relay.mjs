@@ -111,6 +111,23 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // /defaults: env から組織共通デフォルトを返す (API キーは含めない)
+  if (url.pathname === '/defaults' && req.method === 'GET') {
+    const split = (s) => (s || '').split(',').map(t => t.trim()).filter(Boolean);
+    const defaults = {
+      provider:         FALLBACK_PROVIDER || '',
+      corpBaseUrl:      FALLBACK_UPSTREAM || '',
+      corpDeployPrefix: process.env.MAILGUARD_AI_DEPLOY_PREFIX || '',
+      corpModel:        process.env.MAILGUARD_AI_CORP_MODEL || '',
+      claudeModel:      process.env.MAILGUARD_AI_CLAUDE_MODEL || '',
+      ownDomains:       split(process.env.MAILGUARD_OWN_DOMAINS || process.env.MAILGUARD_AI_OWN_DOMAINS),
+      internalKeywords: split(process.env.MAILGUARD_INTERNAL_KEYWORDS || process.env.MAILGUARD_AI_INTERNAL_KEYWORDS),
+    };
+    res.writeHead(200, { ...CORS, 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(defaults));
+    return;
+  }
+
   if (url.pathname === '/v1/chat/completions' && req.method === 'POST') {
     const ctx = resolveContext(req);
     if (ctx.provider === 'claude') {
