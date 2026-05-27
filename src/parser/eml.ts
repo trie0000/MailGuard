@@ -18,14 +18,21 @@ import { splitLatestAndQuoted, extractAttachmentNames, parseAddress } from './co
 export async function parseEml(file: File): Promise<ParsedMail> {
   const buf = new Uint8Array(await file.arrayBuffer());
   const ascii = new TextDecoder('latin1').decode(buf);  // バイト透過な読み込み
-  const { headers, bodyRaw } = splitHeadersBody(ascii);
+  return parseEmlText(ascii, 'eml');
+}
+
+/** 文字列 (= raw eml テキスト) から ParsedMail を生成。
+ *  Mac Outlook のドラッグ非対応に備えた「メッセージのソースを貼り付け」ワークフロー
+ *  でも同じパーサを使い回せるよう、ファイル入力と本体ロジックを分離する。 */
+export function parseEmlText(rawText: string, _source: 'eml' | 'raw-paste' = 'eml'): ParsedMail {
+  const { headers, bodyRaw } = splitHeadersBody(rawText);
 
   const from = parseAddressList(headers['from'] ?? '');
   const to = parseAddressList(headers['to'] ?? '');
   const cc = parseAddressList(headers['cc'] ?? '');
   const bcc = parseAddressList(headers['bcc'] ?? '');
   const subject = decodeWord(headers['subject'] ?? '');
-  const date = headers['date'] ? new Date(headers['date']).toISOString() : null;
+  const date = headers['date'] ? safeIso(headers['date']) : null;
 
   const ct = headers['content-type'] ?? 'text/plain; charset=utf-8';
   const cte = (headers['content-transfer-encoding'] ?? '7bit').toLowerCase();
@@ -48,6 +55,14 @@ export async function parseEml(file: File): Promise<ParsedMail> {
     attachments: attachments.length > 0 ? attachments : extractAttachmentNames(bodyText),
     format: 'eml',
   };
+}
+
+function safeIso(s: string): string | null {
+  try {
+    const d = new Date(s);
+    if (isNaN(d.getTime())) return null;
+    return d.toISOString();
+  } catch { return null; }
 }
 
 // ── ヘッダ + 本文 分離 ────────────────────────────────────────────────

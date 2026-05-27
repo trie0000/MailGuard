@@ -170,3 +170,25 @@ async function runChecks(mail: ParsedMail): Promise<void> {
   getCurrentMail: () => currentMail,
   rerun: () => currentMail && runChecks(currentMail),
 };
+
+// ── グローバル paste ハンドラ ─────────────────────────────────────────
+//   ページ内の入力フィールド以外で Cmd+V/Ctrl+V された時、クリップボード内容を
+//   メールとしてパースを試みる。
+//   Mac Outlook のように .eml ドラッグできない環境で「ソースをコピペ」する
+//   ワークフローを補強する。
+document.addEventListener('paste', async (e) => {
+  // textarea / input にフォーカスがある場合はそちらの処理を優先
+  const target = e.target as HTMLElement | null;
+  if (target && (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT')) return;
+  const text = e.clipboardData?.getData('text/plain') ?? '';
+  if (text.trim().length < 50) return;   // 短いテキストはノイズとして無視
+  e.preventDefault();
+  try {
+    const { parseRawText } = await import('./parser/raw-text');
+    const mail = parseRawText(text);
+    currentMail = mail;
+    showPreviewAndCheckButton(mail);
+  } catch (err) {
+    showError(`貼り付けテキストのパース失敗: ${(err as Error).message}`);
+  }
+});
