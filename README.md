@@ -58,11 +58,36 @@ npm run build           # → dist/mailguard.html (単一ファイル) を生成
 npm run dev             # esbuild --watch + http://localhost:5180
 ```
 
-## Mac / Linux でテストする (= relay 同梱)
+## relay (loopback プロキシ) を起動する
 
 ブラウザは CORS の制約で外部 AI API を直接呼べないので、loopback プロキシ
-(= relay) を経由します。同梱の `relay/mac-relay.mjs` は依存なしで動く Node.js
-製 OpenAI 互換プロキシです (= Spira の PowerShell relay は Windows 専用)。
+(= relay) を経由します。
+
+| OS | 実装 | 起動方法 |
+|---|---|---|
+| **Windows** | `relay/mailguard-relay.ps1` (PowerShell 5.1+) | `start-relay.bat` ダブルクリック |
+| **Mac / Linux** | `relay/mac-relay.mjs` (Node.js) | `./start-relay.sh` |
+
+**依存パッケージなし** — Windows なら PowerShell だけ、Mac/Linux なら Node.js
+だけで動きます。`npm install` は不要 (= 依存ライブラリゼロ)。
+
+### Windows での起動
+
+1. PowerShell 5.1 以上が入っていることを確認 (= Windows 10/11 はデフォルトで OK)
+2. リポジトリをクローン or ZIP ダウンロード → 解凍
+3. `start-relay.bat` をダブルクリック
+4. 黒いウィンドウに以下が出れば成功:
+
+```
+  📨 MailGuard relay (PowerShell)
+  -----------------------------------------
+  Listen  : http://127.0.0.1:18100/
+  設定方針 : API キー / 上流 URL / プロバイダ は ブラウザ UI から送信
+  ...
+  Ctrl+C で停止
+```
+
+### Mac / Linux での起動 (= relay 同梱)
 
 ### ① relay を起動
 

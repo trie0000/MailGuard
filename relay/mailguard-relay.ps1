@@ -1,0 +1,460 @@
+#Requires -Version 5.1
+
+# ============================================================================
+# MailGuard relay (PowerShell 版)
+# ============================================================================
+#
+# 役割:
+#   ブラウザの MailGuard (= mailguard.html) から /v1/chat/completions を受け取り、
+#   ヘッダで指定された上流 AI API に転送する loopback プロキシ。
+#   ブラウザは CORS の制約で外部 AI API を直接呼べないため、loopback で受けて
+#   CORS ヘッダを付けて返す必要がある。
+#
+# 設定方針:
+#   - API キー / 上流 URL / プロバイダ → ブラウザ UI (= Settings) で設定
+#     リクエスト時に Authorization / X-MG-Upstream-Base / X-MG-Provider で受信
+#   - relay 自体の起動設定 (= ポート) は .env で
+#   - 旧 env (MG_API_KEY / MG_UPSTREAM_BASE / MG_PROVIDER) は fallback として読む
+#
+# 起動:
+#   Windows: start-relay.bat ダブルクリック
+#   直接:    powershell -NoProfile -ExecutionPolicy Bypass -File relay\mailguard-relay.ps1
+#
+# 必要環境:
+#   PowerShell 5.1 以上 (= Windows 10/11 に標準で入っている)
+#   Node.js は 不要
+# ============================================================================
+
+[CmdletBinding()]
+param()
+
+$ErrorActionPreference = 'Stop'
+
+# 出力を UTF-8 に
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
+# TLS 1.2 を有効化 (= PS 5.1 デフォルトでは 1.0 まで)
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
+# ── .env ローダ ────────────────────────────────────────────────────────
+function Import-DotEnvFile {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    foreach ($raw in Get-Content -LiteralPath $Path -Encoding UTF8) {
+        $line = $raw.Trim()
+        if (-not $line -or $line.StartsWith('#')) { continue }
+        $eq = $line.IndexOf('=')
+        if ($eq -lt 0) { continue }
+        $key = $line.Substring(0, $eq).Trim()
+        $value = $line.Substring($eq + 1).Trim()
+        if (($value.StartsWith('"') -and $value.EndsWith('"')) -or
+            ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+            $value = $value.Substring(1, $value.Length - 2)
+        }
+        if (-not [Environment]::GetEnvironmentVariable($key, 'Process')) {
+            [Environment]::SetEnvironmentVariable($key, $value, 'Process')
+        }
+    }
+    Write-Host "[relay] loaded env from: $Path"
+}
+
+# 探索: カレント / リポジトリ ルート / スクリプト隣
+$scriptDir = Split-Path -Parent $PSCommandPath
+$repoRoot = Split-Path -Parent $scriptDir
+$envCandidates = @(
+    (Join-Path (Get-Location).Path '.env'),
+    (Join-Path $repoRoot '.env'),
+    (Join-Path $scriptDir '.env')
+) | Select-Object -Unique
+foreach ($p in $envCandidates) {
+    if (Test-Path -LiteralPath $p) { Import-DotEnvFile -Path $p; break }
+}
+
+# ── 設定値 ──────────────────────────────────────────────────────────────
+$port = 18100
+if ($env:MG_PORT) {
+    try { $port = [int]$env:MG_PORT } catch { Write-Host "[!] MG_PORT 不正値: $env:MG_PORT" }
+}
+$fallbackApiKey = $env:MG_API_KEY
+$fallbackUpstream = if ($env:MG_UPSTREAM_BASE) { $env:MG_UPSTREAM_BASE.TrimEnd('/') } else { '' }
+$fallbackProvider = if ($env:MG_PROVIDER) { $env:MG_PROVIDER.ToLower() } else { '' }
+
+# ── CORS / レスポンス ──────────────────────────────────────────────────
+function Set-CorsHeaders {
+    param([System.Net.HttpListenerResponse]$Response)
+    $Response.Headers.Add('Access-Control-Allow-Origin', '*')
+    $Response.Headers.Add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    $Response.Headers.Add('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, X-MG-Provider, X-MG-Upstream-Base, x-api-key, anthropic-version')
+    $Response.Headers.Add('Access-Control-Max-Age', '86400')
+}
+
+function Send-Json {
+    param(
+        [System.Net.HttpListenerResponse]$Response,
+        [int]$StatusCode,
+        [string]$Body
+    )
+    Set-CorsHeaders -Response $Response
+    $Response.StatusCode = $StatusCode
+    $Response.ContentType = 'application/json; charset=utf-8'
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Body)
+    $Response.ContentLength64 = $bytes.Length
+    $Response.OutputStream.Write($bytes, 0, $bytes.Length)
+    $Response.Close()
+}
+
+function Read-RequestBody {
+    param([System.Net.HttpListenerRequest]$Request)
+    if (-not $Request.HasEntityBody) { return '' }
+    $reader = New-Object System.IO.StreamReader($Request.InputStream, [System.Text.Encoding]::UTF8)
+    $body = $reader.ReadToEnd()
+    $reader.Close()
+    return $body
+}
+
+# ── リクエスト ごとの上流 設定 ──────────────────────────────────────────
+function Resolve-Context {
+    param([System.Net.HttpListenerRequest]$Request)
+
+    $provider = $Request.Headers['X-MG-Provider']
+    if (-not $provider) { $provider = $fallbackProvider }
+    if (-not $provider) { $provider = 'openai' }
+    $provider = $provider.ToLower()
+    if ($provider -eq 'claude') { $provider = 'anthropic' }
+
+    $upstream = $Request.Headers['X-MG-Upstream-Base']
+    if (-not $upstream) { $upstream = $fallbackUpstream }
+    if (-not $upstream) {
+        $upstream = if ($provider -eq 'anthropic') { 'https://api.anthropic.com' } else { 'https://api.openai.com' }
+    }
+    $upstream = $upstream.TrimEnd('/')
+
+    $auth = $Request.Headers['Authorization']
+    $apiKey = ''
+    if ($auth) {
+        if ($auth.StartsWith('Bearer ', [System.StringComparison]::OrdinalIgnoreCase)) {
+            $apiKey = $auth.Substring(7).Trim()
+        } else {
+            $apiKey = $auth.Trim()
+        }
+    }
+    if (-not $apiKey) { $apiKey = $fallbackApiKey }
+
+    return [PSCustomObject]@{
+        Provider = $provider
+        Upstream = $upstream
+        ApiKey   = $apiKey
+    }
+}
+
+function Build-UpstreamHeaders {
+    param([PSCustomObject]$Context)
+    $h = @{
+        'Content-Type' = 'application/json'
+        'Accept'       = 'application/json'
+    }
+    if (-not $Context.ApiKey) { return $h }
+    if ($Context.Provider -eq 'anthropic') {
+        $h['x-api-key'] = $Context.ApiKey
+        $h['anthropic-version'] = '2023-06-01'
+    } else {
+        $h['Authorization'] = "Bearer $($Context.ApiKey)"
+    }
+    return $h
+}
+
+# ── 上流 HTTP リクエスト ──────────────────────────────────────────────
+function Invoke-Upstream {
+    param(
+        [string]$Url,
+        [string]$Method,
+        [hashtable]$Headers,
+        [string]$Body
+    )
+
+    $req = [System.Net.HttpWebRequest]::Create($Url)
+    $req.Method = $Method
+    $req.Timeout = 90000
+
+    foreach ($k in $Headers.Keys) {
+        $v = $Headers[$k]
+        switch -Wildcard ($k) {
+            'Content-Type' { $req.ContentType = $v }
+            'Accept'       { $req.Accept = $v }
+            'User-Agent'   { $req.UserAgent = $v }
+            default        { $req.Headers.Add($k, $v) }
+        }
+    }
+
+    if ($Body -and ($Method -eq 'POST' -or $Method -eq 'PUT')) {
+        if (-not $req.ContentType) { $req.ContentType = 'application/json' }
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Body)
+        $req.ContentLength = $bytes.Length
+        $stream = $req.GetRequestStream()
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Close()
+    }
+
+    $statusCode = 0
+    $respBody = ''
+    try {
+        $resp = $req.GetResponse()
+        $statusCode = [int]$resp.StatusCode
+        $reader = New-Object System.IO.StreamReader($resp.GetResponseStream(), [System.Text.Encoding]::UTF8)
+        $respBody = $reader.ReadToEnd()
+        $reader.Close()
+        $resp.Close()
+    } catch [System.Net.WebException] {
+        if ($_.Exception.Response) {
+            $statusCode = [int]$_.Exception.Response.StatusCode
+            $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream(), [System.Text.Encoding]::UTF8)
+            $respBody = $reader.ReadToEnd()
+            $reader.Close()
+            $_.Exception.Response.Close()
+        } else {
+            return [PSCustomObject]@{ StatusCode = 502; Body = '{"error":{"message":"upstream error: ' + ($_.Exception.Message -replace '"', "'") + '"}}' }
+        }
+    } catch {
+        return [PSCustomObject]@{ StatusCode = 502; Body = '{"error":{"message":"upstream error: ' + ($_.Exception.Message -replace '"', "'") + '"}}' }
+    }
+
+    return [PSCustomObject]@{ StatusCode = $statusCode; Body = $respBody }
+}
+
+# ── OpenAI ↔ Anthropic 翻訳 ──────────────────────────────────────────
+function ConvertTo-AnthropicRequest {
+    param($OpenAIReq)
+
+    $messages = @()
+    $system = ''
+    if ($OpenAIReq.messages) {
+        foreach ($m in $OpenAIReq.messages) {
+            if ($m.role -eq 'system') {
+                $content = if ($null -ne $m.content) { [string]$m.content } else { '' }
+                $system = if ($system) { "$system`n`n$content" } else { $content }
+            } elseif ($m.role -eq 'user' -or $m.role -eq 'assistant') {
+                $messages += @{ role = $m.role; content = if ($null -ne $m.content) { [string]$m.content } else { '' } }
+            }
+        }
+    }
+
+    $model = if ($OpenAIReq.model) { $OpenAIReq.model } else { 'claude-sonnet-4-5' }
+    $maxTokens = if ($OpenAIReq.max_tokens) { [int]$OpenAIReq.max_tokens } else { 4096 }
+
+    $out = [ordered]@{
+        model      = $model
+        max_tokens = $maxTokens
+        messages   = $messages
+    }
+    if ($system) { $out['system'] = $system }
+    if ($null -ne $OpenAIReq.temperature) { $out['temperature'] = $OpenAIReq.temperature }
+    return $out
+}
+
+function ConvertFrom-AnthropicResponse {
+    param($AnthropicResp)
+
+    $content = ''
+    if ($AnthropicResp.content) {
+        foreach ($block in $AnthropicResp.content) {
+            if ($block.type -eq 'text' -and $block.text) {
+                $content += $block.text
+            }
+        }
+    }
+
+    $finishReason = switch ($AnthropicResp.stop_reason) {
+        'end_turn'      { 'stop' }
+        'stop_sequence' { 'stop' }
+        'max_tokens'    { 'length' }
+        default         { if ($AnthropicResp.stop_reason) { $AnthropicResp.stop_reason } else { 'stop' } }
+    }
+
+    $promptTokens = if ($AnthropicResp.usage -and $AnthropicResp.usage.input_tokens) { [int]$AnthropicResp.usage.input_tokens } else { 0 }
+    $completionTokens = if ($AnthropicResp.usage -and $AnthropicResp.usage.output_tokens) { [int]$AnthropicResp.usage.output_tokens } else { 0 }
+
+    $epoch = [int][double]::Floor((Get-Date -UFormat %s))
+    $id = if ($AnthropicResp.id) { $AnthropicResp.id } else { "cmpl-$epoch" }
+    $model = if ($AnthropicResp.model) { $AnthropicResp.model } else { '' }
+
+    return [ordered]@{
+        id      = $id
+        object  = 'chat.completion'
+        created = $epoch
+        model   = $model
+        choices = @(
+            [ordered]@{
+                index         = 0
+                message       = [ordered]@{ role = 'assistant'; content = $content }
+                finish_reason = $finishReason
+            }
+        )
+        usage = [ordered]@{
+            prompt_tokens     = $promptTokens
+            completion_tokens = $completionTokens
+            total_tokens      = ($promptTokens + $completionTokens)
+        }
+    }
+}
+
+# ── ハンドラ ───────────────────────────────────────────────────────────
+function Handle-Chat {
+    param(
+        [System.Net.HttpListenerRequest]$Request,
+        [System.Net.HttpListenerResponse]$Response
+    )
+
+    $body = Read-RequestBody -Request $Request
+    $ctx = Resolve-Context -Request $Request
+
+    if ($ctx.Provider -eq 'anthropic') {
+        try {
+            $openaiReq = $body | ConvertFrom-Json
+        } catch {
+            Send-Json -Response $Response -StatusCode 400 -Body '{"error":{"message":"invalid JSON request"}}'
+            return
+        }
+        $anthropicReq = ConvertTo-AnthropicRequest -OpenAIReq $openaiReq
+        $sendBody = $anthropicReq | ConvertTo-Json -Depth 100 -Compress
+        $upstreamUrl = "$($ctx.Upstream)/v1/messages"
+        Write-Host "[relay] POST /v1/chat/completions -> $upstreamUrl (anthropic, model=$($anthropicReq.model))"
+
+        $headers = Build-UpstreamHeaders -Context $ctx
+        $upstreamResp = Invoke-Upstream -Url $upstreamUrl -Method 'POST' -Headers $headers -Body $sendBody
+
+        if ($upstreamResp.StatusCode -eq 200) {
+            try {
+                $anthropicResp = $upstreamResp.Body | ConvertFrom-Json
+                $openaiResp = ConvertFrom-AnthropicResponse -AnthropicResp $anthropicResp
+                $respBody = $openaiResp | ConvertTo-Json -Depth 100 -Compress
+                Send-Json -Response $Response -StatusCode 200 -Body $respBody
+            } catch {
+                Write-Host "[relay] response translation failed: $_" -ForegroundColor Yellow
+                Send-Json -Response $Response -StatusCode 502 -Body ('{"error":{"message":"response translation failed: ' + ($_.Exception.Message -replace '"', "'") + '"}}')
+            }
+        } else {
+            Write-Host "[relay] anthropic HTTP $($upstreamResp.StatusCode): $($upstreamResp.Body.Substring(0, [Math]::Min(200, $upstreamResp.Body.Length)))" -ForegroundColor Yellow
+            Send-Json -Response $Response -StatusCode $upstreamResp.StatusCode -Body $upstreamResp.Body
+        }
+    } else {
+        # OpenAI 互換: 透過
+        $upstreamUrl = "$($ctx.Upstream)/v1/chat/completions"
+        Write-Host "[relay] POST /v1/chat/completions -> $upstreamUrl (openai, $($body.Length) bytes)"
+        $headers = Build-UpstreamHeaders -Context $ctx
+        $upstreamResp = Invoke-Upstream -Url $upstreamUrl -Method 'POST' -Headers $headers -Body $body
+        Send-Json -Response $Response -StatusCode $upstreamResp.StatusCode -Body $upstreamResp.Body
+    }
+}
+
+function Handle-Models {
+    param(
+        [System.Net.HttpListenerRequest]$Request,
+        [System.Net.HttpListenerResponse]$Response
+    )
+
+    $ctx = Resolve-Context -Request $Request
+    $upstreamUrl = "$($ctx.Upstream)/v1/models"
+    Write-Host "[relay] GET /v1/models -> $upstreamUrl ($($ctx.Provider))"
+    $headers = Build-UpstreamHeaders -Context $ctx
+    $upstreamResp = Invoke-Upstream -Url $upstreamUrl -Method 'GET' -Headers $headers -Body ''
+    Send-Json -Response $Response -StatusCode $upstreamResp.StatusCode -Body $upstreamResp.Body
+}
+
+function Handle-Request {
+    param([System.Net.HttpListenerContext]$Context)
+
+    $req = $Context.Request
+    $res = $Context.Response
+
+    # CORS プリフライト
+    if ($req.HttpMethod -eq 'OPTIONS') {
+        Set-CorsHeaders -Response $res
+        $res.StatusCode = 204
+        $res.Close()
+        return
+    }
+
+    $pathLower = $req.Url.AbsolutePath.ToLower()
+
+    if ($pathLower -eq '/health' -or $pathLower -eq '/spira/health') {
+        $info = [ordered]@{
+            ok                 = $true
+            relay              = 'mailguard-ps-relay'
+            port               = $port
+            note               = 'API key / upstream / provider は ブラウザ UI から送信される X-MG-* / Authorization ヘッダで受信'
+            fallbackProvider   = if ($fallbackProvider) { $fallbackProvider } else { $null }
+            fallbackUpstream   = if ($fallbackUpstream) { $fallbackUpstream } else { $null }
+            hasFallbackApiKey  = [bool]$fallbackApiKey
+        }
+        Send-Json -Response $res -StatusCode 200 -Body ($info | ConvertTo-Json -Depth 10 -Compress)
+        return
+    }
+
+    if ($pathLower -eq '/v1/chat/completions' -and $req.HttpMethod -eq 'POST') {
+        Handle-Chat -Request $req -Response $res
+        return
+    }
+
+    if ($pathLower -eq '/v1/models' -and $req.HttpMethod -eq 'GET') {
+        Handle-Models -Request $req -Response $res
+        return
+    }
+
+    Send-Json -Response $res -StatusCode 404 -Body ('{"error":{"message":"Not Found: ' + $req.Url.AbsolutePath + '"}}')
+}
+
+# ── HttpListener 起動 ───────────────────────────────────────────────────
+$prefix = "http://127.0.0.1:$port/"
+$listener = New-Object System.Net.HttpListener
+$listener.Prefixes.Add($prefix)
+
+try {
+    $listener.Start()
+} catch {
+    Write-Host ''
+    Write-Host "[!] HttpListener.Start() に失敗しました: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host '   ポート競合 (= 他のプロセスが使用中) の可能性があります。'
+    Write-Host '   .env で MG_PORT=18200 等に変更してください。'
+    Write-Host ''
+    exit 1
+}
+
+Write-Host ''
+Write-Host '  📨 MailGuard relay (PowerShell)'
+Write-Host '  -----------------------------------------'
+Write-Host "  Listen  : $prefix"
+Write-Host '  設定方針 : API キー / 上流 URL / プロバイダ は ブラウザ UI から送信'
+Write-Host "  Test    : curl $($prefix)health"
+if ($fallbackApiKey -or $fallbackUpstream -or $fallbackProvider) {
+    Write-Host '  -----------------------------------------'
+    Write-Host '  env fallback (= UI 未設定時に使用):'
+    if ($fallbackProvider) { Write-Host "    MG_PROVIDER      = $fallbackProvider" }
+    if ($fallbackUpstream) { Write-Host "    MG_UPSTREAM_BASE = $fallbackUpstream" }
+    if ($fallbackApiKey)   {
+        $masked = $fallbackApiKey.Substring(0, [Math]::Min(8, $fallbackApiKey.Length))
+        Write-Host "    MG_API_KEY       = $masked..."
+    }
+}
+Write-Host '  -----------------------------------------'
+Write-Host '  Ctrl+C で停止'
+Write-Host ''
+
+try {
+    while ($listener.IsListening) {
+        try {
+            $ctx = $listener.GetContext()
+            Handle-Request -Context $ctx
+        } catch [System.Net.HttpListenerException] {
+            # 停止時の正常終了
+            if ($_.Exception.ErrorCode -eq 995 -or -not $listener.IsListening) { break }
+            Write-Host "[relay] listener error: $($_.Exception.Message)" -ForegroundColor Yellow
+        } catch {
+            Write-Host "[relay] error: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+} finally {
+    if ($listener.IsListening) { $listener.Stop() }
+    $listener.Close()
+    Write-Host ''
+    Write-Host '[relay] stopped.'
+}
