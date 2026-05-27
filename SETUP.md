@@ -12,18 +12,33 @@ Node.js / npm は **不要** です。
 ## ① 配布フォルダを展開
 
 管理者から受け取った ZIP / 共有フォルダを任意の場所に解凍 (例: `C:\Users\<自分>\MailGuard\`)。
-中身は以下のような構成:
 
+中身は **どちらの構成でも動く** ようになっています (= `MailGuard.bat` が自動判別):
+
+**A. 階層構造** (= リポジトリそのままの形):
 ```
 MailGuard/
-├── dist/
-│   └── mailguard.html              ← ブラウザで開く UI 本体
-├── relay/
-│   └── mailguard-relay.ps1         ← PowerShell 製の loopback プロキシ
-├── MailGuard.bat                 ← 起動用バッチ
+├── MailGuard.bat                   ← 起動用バッチ
 ├── .env                            ← 組織共通設定 (admin 設定済み)
-└── SETUP.md                        ← このファイル
+├── SETUP.md                        ← このファイル
+├── dist/
+│   └── mailguard.html              ← UI 本体
+└── relay/
+    └── mailguard-relay.ps1         ← PowerShell relay
 ```
+
+**B. フラット構成** (= 配布用に同一フォルダにまとめた形):
+```
+MailGuard/
+├── MailGuard.bat                   ← 起動用バッチ
+├── .env                            ← 組織共通設定 (admin 設定済み)
+├── SETUP.md                        ← このファイル
+├── mailguard.html                  ← UI 本体
+└── mailguard-relay.ps1             ← PowerShell relay
+```
+
+どちらでも構いません。階層構造は GitHub からそのままダウンロードした時の形、フラット
+は管理者がパッケージングして配る時の形。`MailGuard.bat` が両方とも自動的に見つけます。
 
 ## ② 起動
 
