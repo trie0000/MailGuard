@@ -32,6 +32,15 @@ if errorlevel 1 (
   exit /b 1
 )
 
+REM Open MailGuard UI in the default browser (non-blocking).
+REM The HTML loads without needing relay; relay is hit only on "AI check" button.
+REM By the time the user clicks the button (a few seconds later), relay is up.
+if exist "%~dp0dist\mailguard.html" (
+  start "" "%~dp0dist\mailguard.html"
+) else (
+  echo [!] dist\mailguard.html not found. Run "npm run build" first.
+)
+
 REM -ExecutionPolicy Bypass: skip script signing requirement for THIS process only
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0relay\mailguard-relay.ps1"
 

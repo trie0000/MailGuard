@@ -131,67 +131,12 @@ export function createDropzone(opts: DropzoneOpts): HTMLElement {
     handleDrop(e, opts);
   });
 
-  // ── 貼り付け (paste) 用エリア ─────────────────────────────────────
-  const pasteArea = el('textarea', {
-    class: 'mg-paste',
-    rows: '6',
-    placeholder: 'もしくは、メール本文 (= ヘッダ込みのソース) をここに貼り付け…\n'
-                + '\n'
-                + 'Mac Outlook の場合: メール選択 → メニュー → 表示 → メッセージの\n'
-                + 'ソースを表示 → 全選択 → コピー → ここに貼り付け',
-    style: 'width:100%;padding:12px 14px;border:1px dashed #c0bdb0;border-radius:10px;'
-         + 'font:13px/1.6 ui-monospace,Menlo,Consolas,monospace;background:#fff;'
-         + 'resize:vertical;color:#2a2a26;min-height:120px;margin-bottom:12px',
-  }) as HTMLTextAreaElement;
-  pasteArea.addEventListener('paste', () => {
-    setTimeout(() => {
-      const text = pasteArea.value;
-      if (!text.trim()) return;
-      try {
-        const mail = parseRawText(text);
-        opts.onMail(mail);
-      } catch (err) {
-        opts.onError(`貼り付けテキストのパース失敗: ${(err as Error).message}`);
-      }
-    }, 0);
-  });
-
-  // ── Outlook ドラッグが効かない時の救済ボタン ────────────────────
-  const manualPasteBtn = el('button', {
-    style: 'width:100%;padding:12px 16px;background:#fff;color:#7a766c;'
-         + 'border:1px dashed #c0bdb0;border-radius:10px;font-size:13px;cursor:pointer;'
-         + 'margin-bottom:12px;line-height:1.6;text-align:center;transition:all 0.15s',
-    onmouseenter: function (this: HTMLElement) {
-      this.style.background = '#f3f1ea';
-      this.style.borderColor = '#7a8a78';
-    },
-    onmouseleave: function (this: HTMLElement) {
-      this.style.background = '#fff';
-      this.style.borderColor = '#c0bdb0';
-    },
-    onclick: () => {
-      openOutlookPastePrompt({ onMail: opts.onMail });
-    },
-  }, [
-    el('div', { style: 'font-size:20px;line-height:1;margin-bottom:4px' }, ['📋']),
-    el('div', { style: 'font-weight:600;color:#2a2a26' }, [
-      'メール ソースを貼り付けて取り込み',
-    ]),
-    el('div', { style: 'font-size:11px;color:#7a766c;margin-top:2px' }, [
-      'Outlook ドラッグが効かない場合 (= Mac Outlook 等) はこちら',
-    ]),
-  ]);
-
-  const wrapper = el('div', { class: 'mg-drop-wrapper' }, [
-    dropEl,
-    el('div', {
-      style: 'font-size:11px;color:#a8a39a;text-align:center;margin:6px 0 8px;line-height:1.6',
-    }, ['────────  または  ────────']),
-    manualPasteBtn,
-    pasteArea,
-  ]);
-
-  return wrapper;
+  // Mac Outlook 用 paste UI は廃止 (Windows Outlook ドラッグが本筋のため)。
+  // ★ ⌘V / Ctrl+V でのグローバル paste 受付は main.ts に残しているため、
+  //    Outlook 以外のソース (= メッセージのソース表示してコピペ) も依然受け取れる。
+  // ★ ドラッグでファイル化できなかった時の救済モーダル (openOutlookPastePrompt)
+  //    は handleDrop の最後に保険として呼ばれる (= 通常時は出ない)。
+  return dropEl;
 }
 
 // ── ドロップ ハンドリング ────────────────────────────────────────────

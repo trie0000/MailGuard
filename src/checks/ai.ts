@@ -41,9 +41,21 @@ export async function runAICheck(
   return parseAIResponse(content);
 }
 
+// メール本文 (= 最新返信文 + 引用履歴) を AI に渡す際の合計上限。
+// 最新返信文を優先して使い、残った文字数で引用履歴を埋める。
+const BODY_AI_MAX = 5000;
+
 function buildUserPrompt(mail: ParsedMail, detHits: DeterministicHit[]): string {
-  const truncate = (s: string, max: number) => s.length > max ? s.slice(0, max) + '\n…(以下省略)' : s;
+  const trunc = (s: string, max: number) => s.length > max ? s.slice(0, max) + '\n…(以下省略)' : s;
   const fmtAddr = (a: { name: string; email: string }) => a.name ? `${a.name} <${a.email}>` : a.email;
+
+  // ★ 本文 5000 文字制限: latestReply を 先に確保し、残りを quotedHistory に割当
+  const latestRaw = mail.latestReply || mail.bodyText || '';
+  const latestForAi = trunc(latestRaw, BODY_AI_MAX);
+  const remainingBudget = Math.max(0, BODY_AI_MAX - latestForAi.length);
+  const quotedForAi = remainingBudget > 0
+    ? trunc(mail.quotedHistory || '', remainingBudget)
+    : '(本文上限到達のため省略)';
 
   const detSummary = detHits.length === 0
     ? '(なし)'
@@ -60,10 +72,10 @@ function buildUserPrompt(mail: ParsedMail, detHits: DeterministicHit[]): string 
     mail.subject || '(なし)',
     '',
     '【最新の返信本文】',
-    truncate(mail.latestReply || mail.bodyText || '(なし)', 4000),
+    latestForAi || '(なし)',
     '',
     '【過去のやり取り (引用部から抽出)】',
-    truncate(mail.quotedHistory || '(なし)', 4000),
+    quotedForAi || '(なし)',
     '',
     '【添付ファイル名】',
     mail.attachments.length === 0 ? '(なし)' : mail.attachments.join(', '),
@@ -71,6 +83,7 @@ function buildUserPrompt(mail: ParsedMail, detHits: DeterministicHit[]): string 
     '【決定論ルールによる事前検出】',
     detSummary,
     '',
+    `※ 本文の AI 投入上限: ${BODY_AI_MAX} 文字 (= 最新返信文 + 引用履歴 合計)。`,
     '上記を踏まえて、JSON 形式 (前置きなし) で判定結果を出力してください。',
   ].join('\n');
 }

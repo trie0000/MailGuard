@@ -29,4 +29,15 @@ if [ -f .env ]; then
   set +a
 fi
 
+# Open MailGuard UI in default browser (non-blocking)
+if [ -f dist/mailguard.html ]; then
+  if command -v xdg-open > /dev/null 2>&1; then
+    xdg-open dist/mailguard.html > /dev/null 2>&1 &
+  elif command -v open > /dev/null 2>&1; then
+    open dist/mailguard.html > /dev/null 2>&1 &
+  fi
+else
+  echo "[!] dist/mailguard.html not found. Run 'npm run build' first."
+fi
+
 node relay/mac-relay.mjs
