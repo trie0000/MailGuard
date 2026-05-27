@@ -6,6 +6,7 @@ import {
   Settings, DEFAULT_SETTINGS, Provider,
   CLAUDE_MODELS, CORP_AI_MODELS,
 } from '../types';
+import { DEFAULT_SYSTEM_PROMPT } from '../prompts';
 import { getSettings, setSettings } from '../settings';
 
 const LABEL_STYLE =
@@ -119,6 +120,52 @@ export function openSettingsModal(onClose: (newSettings: Settings) => void): voi
        + '機密キーワード = 本文出現 + 外部宛で high リスク扱い。'),
   ]);
 
+  // ── システム プロンプト (= AI に渡す指示) ────────────────────────────
+  //   空欄 = 組込デフォルトを使用。「既定を挿入」で textarea にデフォルト値を
+  //   流し込み、編集の起点にできる (= Spira aiSettingsModal と同じパターン)。
+  const sysPromptTa = el('textarea', {
+    rows: '8',
+    placeholder: '(空欄なら組込デフォルトを使用)',
+    style: 'width:100%;padding:10px 12px;border:1px solid #c0bdb0;border-radius:6px;'
+         + 'font:12px/1.6 ui-monospace,Menlo,Consolas,monospace;color:#2a2a26;'
+         + 'background:#fff;resize:vertical;min-height:160px',
+  }) as HTMLTextAreaElement;
+  sysPromptTa.value = current.systemPrompt;
+
+  const insertDefaultBtn = el('button', {
+    type: 'button',
+    style: 'padding:5px 12px;background:#fff;color:#7a766c;border:1px solid #c0bdb0;'
+         + 'border-radius:4px;font-size:11px;cursor:pointer',
+    title: '組込の既定システムプロンプトを textarea に挿入 (= 編集の起点用)',
+    onclick: () => {
+      sysPromptTa.value = DEFAULT_SYSTEM_PROMPT;
+      sysPromptTa.dispatchEvent(new Event('input', { bubbles: true }));
+    },
+  }, ['既定を挿入']);
+
+  const resetSysPromptBtn = el('button', {
+    type: 'button',
+    style: 'padding:5px 12px;background:#fff;color:#7a766c;border:1px solid #c0bdb0;'
+         + 'border-radius:4px;font-size:11px;cursor:pointer',
+    title: 'textarea を空にして組込デフォルトに戻す (= 保存時に空文字 = デフォルト使用)',
+    onclick: () => {
+      sysPromptTa.value = '';
+      sysPromptTa.dispatchEvent(new Event('input', { bubbles: true }));
+    },
+  }, ['デフォルトに戻す']);
+
+  const sysPromptBlock = el('div', { style: 'margin-top:18px;padding-top:14px;border-top:1px solid #e8e4d8' }, [
+    el('div', { style: 'display:flex;align-items:center;gap:10px;margin-bottom:6px' }, [
+      el('div', { style: 'font-size:13px;font-weight:600;color:#2a2a26' }, ['AI システム プロンプト']),
+      insertDefaultBtn,
+      resetSysPromptBtn,
+    ]),
+    hint('AI への基本指示。判定軸 / 出力形式 / 役割 を記述します。\n'
+       + '空欄なら組込デフォルト (= 5 軸 JSON 応答強制) を使用。\n'
+       + '「既定を挿入」で雛形を入れて編集 → 「デフォルトに戻す」で空に戻せます。'),
+    sysPromptTa,
+  ]);
+
   // ── ボタン ────────────────────────────────────────────────────────────
   const btnSave = el('button', {
     style: 'padding:9px 22px;background:#7a8a78;color:#fff;border:0;border-radius:6px;'
@@ -133,6 +180,7 @@ export function openSettingsModal(onClose: (newSettings: Settings) => void): voi
         corpModel: corpModelSel.value || DEFAULT_SETTINGS.corpModel,
         corpBaseUrl: corpBaseUrlInput.value.trim().replace(/\/+$/, ''),
         corpDeployPrefix: corpPrefixInput.value.trim(),
+        systemPrompt: sysPromptTa.value,    // 空文字なら ai.ts 側で組込デフォルトに fallback
         ownDomains: ownDomainsInput.value.split(',').map(s => s.trim()).filter(Boolean),
         internalKeywords: keywordsInput.value.split(',').map(s => s.trim()).filter(Boolean),
         typoDomains: current.typoDomains,
@@ -164,6 +212,7 @@ export function openSettingsModal(onClose: (newSettings: Settings) => void): voi
   ]));
   modal.appendChild(blockArea);
   modal.appendChild(commonBlock);
+  modal.appendChild(sysPromptBlock);
   modal.appendChild(el('div', { style: 'display:flex;gap:10px;justify-content:flex-end;margin-top:22px' }, [
     btnCancel, btnSave,
   ]));

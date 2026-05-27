@@ -89,6 +89,9 @@ export interface Settings {
   corpBaseUrl: string;        // 例: https://gateway.example.com/myapi
   corpDeployPrefix: string;   // 例: spira-
 
+  // AI の system プロンプト (= 空文字なら DEFAULT_SYSTEM_PROMPT を使用)
+  systemPrompt: string;
+
   // チェック設定
   ownDomains: string[];
   internalKeywords: string[];
@@ -104,6 +107,7 @@ export const DEFAULT_SETTINGS: Settings = {
   corpModel: 'gpt-4o-mini',
   corpBaseUrl: '',
   corpDeployPrefix: '',
+  systemPrompt: '',  // 空 = 組込デフォルト (= DEFAULT_SYSTEM_PROMPT) を使用
   ownDomains: [],
   internalKeywords: ['社外秘', '機密', 'マル秘', '秘扱', '人事評価', '給与', '社内限り', 'Confidential', 'Internal Only'],
   typoDomains: {

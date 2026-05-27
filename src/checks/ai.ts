@@ -9,42 +9,11 @@
 // 入力サイズが大きいとコスト・遅延が膨らむため、quotedHistory は 4KB 程度に切詰める。
 
 import { ParsedMail, AICheckResult, Settings, DeterministicHit, activeModel, supportsTemperature } from '../types';
+import { DEFAULT_SYSTEM_PROMPT } from '../prompts';
 import { chatCompletion, ChatRequest } from '../relay/ai-client';
 
-const SYSTEM_PROMPT = `あなたはメール誤送信検出の専門家です。
-日本のビジネスメールを中心に、ヘッダ / 本文 / 過去履歴を比較して
-「別人・別案件に誤って送ろうとしている可能性」を判定してください。
-
-判定軸 (= 必ず全て見る):
-  1. 本文冒頭の宛名 (例: 「田中様」) と To の名前は一致するか
-  2. 本文の話題と過去履歴の話題は連続しているか
-  3. 本文に固有名詞 (会社名 / 案件 ID / 製品名) が出る場合、To と整合するか
-  4. 文体・敬語レベルは過去スレッドと一貫しているか
-
-★ 注意: 宛先メアドの新規/既知判定は決定論ルール (= 別途実行済) が機械的に
-   担当しているため、AI 側ではドメイン一致 / メアド一致の機械的判定は行わない。
-   AI は文脈解釈・固有名詞・話題連続性 等の "意味" 判定に集中すること。
-
-応答は必ず以下の JSON のみ (= 説明文や前置きを付けないこと):
-{
-  "riskLevel": "high" | "medium" | "low" | "ok",
-  "confidence": 0.0〜1.0 の数値,
-  "issues": [
-    {
-      "category": "宛名不一致" | "話題乖離" | "固有名詞不整合" | "文体急変" | "その他",
-      "detail": "具体的にどう問題か (1〜2 文)",
-      "severity": "high" | "medium" | "low"
-    }
-  ],
-  "summary": "総評 (1〜2 文)"
-}
-
-各 issue の severity 基準:
-  - high: 誤送信の可能性が極めて高い (= 別人・別案件)
-  - medium: 違和感はあるが正当な可能性も残る (= 要確認)
-  - low: 軽微 (= 表記ゆれ・敬称差 等)
-
-問題なし時は { "riskLevel": "ok", "confidence": ..., "issues": [], "summary": "..." } を返してください。`;
+// SYSTEM_PROMPT は src/prompts.ts の DEFAULT_SYSTEM_PROMPT を組込デフォルトとして使い、
+// settings.systemPrompt が非空ならそちらで上書き (= 設定画面でカスタマイズ可能)。
 
 export async function runAICheck(
   mail: ParsedMail,
@@ -52,6 +21,9 @@ export async function runAICheck(
   settings: Settings,
 ): Promise<AICheckResult> {
   const userPrompt = buildUserPrompt(mail, detHits);
+  // ★ system プロンプトは settings.systemPrompt が空文字なら組込デフォルトに fallback。
+  //   設定画面の textarea で利用者が自由にカスタマイズできる。
+  const systemPrompt = (settings.systemPrompt ?? '').trim() || DEFAULT_SYSTEM_PROMPT;
   // reasoning モデル (= gpt-5 / o3 / o4-mini 系) は temperature カスタム値を
   // 受け付けず、明示するとエラー (= "temperature does not support 0 with this model")
   // になるため、条件付きで省略する。
@@ -59,7 +31,7 @@ export async function runAICheck(
     model: activeModel(settings),
     response_format: { type: 'json_object' },
     messages: [
-      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
     ],
   };
