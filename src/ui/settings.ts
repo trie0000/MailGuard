@@ -8,7 +8,7 @@ import {
 } from '../types';
 import { DEFAULT_SYSTEM_PROMPT } from '../prompts';
 import { getSettings, setSettings } from '../settings';
-import { fetchEnvDefaults, mergeEnvDefaults } from '../defaults';
+import { fetchEnvDefaults, normalizeProvider } from '../defaults';
 
 const LABEL_STYLE =
   'color:#7a766c;font-size:13px;align-self:center;justify-self:end;text-align:right;white-space:nowrap';
@@ -210,28 +210,54 @@ export function openSettingsModal(onClose: (newSettings: Settings) => void): voi
       envResetStatus.textContent = '⏳ relay から /defaults を取得中…';
       envResetStatus.style.color = '#7a766c';
       const env = await fetchEnvDefaults(relayUrlInput.value.trim() || DEFAULT_SETTINGS.relayUrl);
-      if (Object.keys(env).length === 0) {
+      // 診断: 受信内容と適用結果を console に出す (= 利用者が F12 で確認可能)
+      console.log('[mailguard] /defaults response:', env);
+      if (!env || Object.keys(env).length === 0) {
         envResetStatus.textContent = '✗ relay 未起動 / defaults なし';
         envResetStatus.style.color = '#dc2626';
         return;
       }
-      // フォーム フィールドを env 値で上書き (= API キーは触らない)
-      const merged = mergeEnvDefaults({
-        ...DEFAULT_SETTINGS,
-        claudeApiKey: claudeKeyInput.value,  // 保持
-        corpApiKey: corpKeyInput.value,      // 保持
-        typoDomains: current.typoDomains,    // 保持
-        systemPrompt: current.systemPrompt,  // 保持
-      }, env);
-      providerSel.value = merged.provider;
-      providerSel.dispatchEvent(new Event('change', { bubbles: true }));
-      corpBaseUrlInput.value = merged.corpBaseUrl;
-      corpPrefixInput.value = merged.corpDeployPrefix;
-      corpModelSel.value = merged.corpModel;
-      claudeModelSel.value = merged.claudeModel;
-      ownDomainsInput.value = merged.ownDomains.join(', ');
-      keywordsInput.value = merged.internalKeywords.join(', ');
-      envResetStatus.textContent = '✓ env デフォルト値で上書きしました (= 保存するまで永続化されません)';
+
+      const applied: string[] = [];
+      const skipped: string[] = [];
+
+      // provider: 'claude' | 'corp' に正規化 (= 別名 anthropic/openai も吸収)
+      const p = normalizeProvider(env.provider);
+      if (p) {
+        providerSel.value = p;
+        providerSel.dispatchEvent(new Event('change', { bubbles: true }));
+        applied.push(`provider=${p}`);
+      } else {
+        skipped.push(`provider (env="${env.provider ?? ''}")`);
+      }
+
+      // corp 系
+      if (env.corpBaseUrl) { corpBaseUrlInput.value = env.corpBaseUrl; applied.push('corpBaseUrl'); }
+      else skipped.push('corpBaseUrl');
+
+      if (env.corpDeployPrefix) { corpPrefixInput.value = env.corpDeployPrefix; applied.push('corpDeployPrefix'); }
+      else skipped.push('corpDeployPrefix');
+
+      if (env.corpModel) { corpModelSel.value = env.corpModel; applied.push('corpModel'); }
+      else skipped.push('corpModel');
+
+      if (env.claudeModel) { claudeModelSel.value = env.claudeModel; applied.push('claudeModel'); }
+      else skipped.push('claudeModel');
+
+      // 自社ドメイン / 機密キーワード
+      if (Array.isArray(env.ownDomains) && env.ownDomains.length > 0) {
+        ownDomainsInput.value = env.ownDomains.join(', ');
+        applied.push(`ownDomains(${env.ownDomains.length})`);
+      } else skipped.push('ownDomains');
+
+      if (Array.isArray(env.internalKeywords) && env.internalKeywords.length > 0) {
+        keywordsInput.value = env.internalKeywords.join(', ');
+        applied.push(`internalKeywords(${env.internalKeywords.length})`);
+      } else skipped.push('internalKeywords');
+
+      console.log('[mailguard] env-reset applied:', applied, 'skipped(env で未設定):', skipped);
+      envResetStatus.innerHTML = `✓ 更新: ${applied.join(', ') || '(なし)'}`
+        + `<br><span style="color:#a8a39a">スキップ (env 未設定): ${skipped.join(', ') || '(なし)'}</span>`;
       envResetStatus.style.color = '#065f46';
     },
   }, ['env デフォルトに戻す']);

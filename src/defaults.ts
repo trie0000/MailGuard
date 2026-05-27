@@ -31,13 +31,21 @@ export async function fetchEnvDefaults(relayUrl: string): Promise<EnvDefaults> {
   } catch { return {}; }
 }
 
+/** provider の別名を吸収して 'claude' | 'corp' に正規化。
+ *  Spira / 旧コードから来た値 (= 'anthropic' / 'openai') にも対応。 */
+export function normalizeProvider(raw: string | undefined | null): Provider | null {
+  const v = String(raw ?? '').trim().toLowerCase();
+  if (v === 'claude' || v === 'anthropic') return 'claude';
+  if (v === 'corp' || v === 'openai') return 'corp';
+  return null;
+}
+
 /** env defaults を既存 settings に上書きマージして返す (= 非破壊)。
- *  空文字 / 空配列は無視 (= env で未設定なら DEFAULT_SETTINGS の値を維持)。 */
+ *  空文字 / 空配列は無視 (= env で未設定なら base の値を維持)。 */
 export function mergeEnvDefaults(base: Settings, env: EnvDefaults): Settings {
   const next = { ...base };
-  if (env.provider === 'claude' || env.provider === 'corp') {
-    next.provider = env.provider as Provider;
-  }
+  const p = normalizeProvider(env.provider);
+  if (p) next.provider = p;
   if (env.corpBaseUrl) next.corpBaseUrl = env.corpBaseUrl;
   if (env.corpDeployPrefix) next.corpDeployPrefix = env.corpDeployPrefix;
   if (env.corpModel) next.corpModel = env.corpModel;
