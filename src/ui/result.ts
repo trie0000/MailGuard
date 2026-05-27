@@ -1,0 +1,110 @@
+import { el } from '../utils/dom';
+import { CombinedResult, DeterministicHit, AIIssue } from '../types';
+
+export function renderResult(result: CombinedResult): HTMLElement {
+  const aiOk = !('error' in result.ai);
+  const aiResult = aiOk ? (result.ai as Exclude<typeof result.ai, { error: string }>) : null;
+  const aiError = !aiOk ? (result.ai as { error: string }).error : null;
+
+  // 総合リスク = max(decisive hits の最高 severity, ai.riskLevel)
+  const allSev = [
+    ...result.deterministic.map(h => h.severity),
+    ...(aiResult ? aiResult.issues.map(i => i.severity) : []),
+  ];
+  const overall = aiResult?.riskLevel === 'ok' && result.deterministic.length === 0
+    ? 'ok'
+    : allSev.includes('high') ? 'high'
+    : allSev.includes('medium') ? 'medium'
+    : allSev.includes('low') ? 'low'
+    : (aiResult?.riskLevel ?? 'ok');
+
+  return el('div', {
+    style: 'background:#fff;border-radius:10px;padding:20px;border:1px solid #e8e4d8',
+  }, [
+    renderOverallBanner(overall, aiResult?.confidence ?? null, aiResult?.summary ?? null),
+
+    // 決定論ルール ヒット
+    el('div', { style: 'margin-top:18px' }, [
+      sectionHeader('🔧 ルールベース検出', `${result.deterministic.length} 件`),
+      result.deterministic.length === 0
+        ? el('div', { style: 'font-size:13px;color:#7a766c;padding:6px 0' }, ['(検出なし)'])
+        : el('div', {}, result.deterministic.map(renderDetHit)),
+    ]),
+
+    // AI 結果
+    el('div', { style: 'margin-top:18px' }, [
+      sectionHeader('🤖 AI 解析結果',
+        aiOk ? `${aiResult!.issues.length} 件 / 信頼度 ${Math.round((aiResult!.confidence ?? 0) * 100)}%`
+             : '失敗'),
+      aiError
+        ? el('div', { style: 'font-size:13px;color:#991b1b;padding:8px 12px;background:#fee2e2;border-radius:6px' }, [aiError])
+        : aiResult!.issues.length === 0
+          ? el('div', { style: 'font-size:13px;color:#7a766c;padding:6px 0' }, ['(AI: 問題なし)'])
+          : el('div', {}, aiResult!.issues.map(renderAIIssue)),
+      ...(aiResult?.summary && aiResult.issues.length > 0 ? [
+        el('div', {
+          style: 'margin-top:10px;padding:8px 12px;background:#f3f1ea;border-radius:6px;'
+               + 'font-size:12px;color:#7a766c;line-height:1.7;font-style:italic',
+        }, ['💬 AI 総評: ' + aiResult.summary]),
+      ] : []),
+    ]),
+  ]);
+}
+
+function sectionHeader(label: string, badge: string): HTMLElement {
+  return el('div', { style: 'display:flex;align-items:center;gap:10px;margin-bottom:8px' }, [
+    el('div', { style: 'font-size:13px;font-weight:700;color:#2a2a26' }, [label]),
+    el('div', { style: 'font-size:11px;color:#a8a39a;padding:2px 8px;background:#f3f1ea;border-radius:10px' }, [badge]),
+  ]);
+}
+
+function renderOverallBanner(level: string, confidence: number | null, summary: string | null): HTMLElement {
+  const palette: Record<string, { bg: string; border: string; color: string; icon: string; label: string }> = {
+    high: { bg: '#fef2f2', border: '#dc2626', color: '#991b1b', icon: '🚨', label: '高リスク — 送信前に必ず確認' },
+    medium: { bg: '#fef3c7', border: '#f59e0b', color: '#92400e', icon: '⚠', label: '中リスク — 一度確認をおすすめ' },
+    low: { bg: '#fef3c7', border: '#f59e0b', color: '#92400e', icon: '💡', label: '低リスク — 軽微な指摘あり' },
+    ok: { bg: '#ecfdf5', border: '#10b981', color: '#065f46', icon: '✅', label: '問題なし — 送信して OK' },
+  };
+  const p = palette[level] ?? palette.ok!;
+  return el('div', {
+    style: `background:${p.bg};border-left:6px solid ${p.border};color:${p.color};`
+         + 'padding:16px 20px;border-radius:8px;display:flex;gap:14px;align-items:flex-start',
+  }, [
+    el('div', { style: 'font-size:30px;line-height:1' }, [p.icon]),
+    el('div', { style: 'flex:1;min-width:0' }, [
+      el('div', { style: 'font-size:16px;font-weight:700;margin-bottom:4px' }, [p.label]),
+      ...(confidence !== null ? [
+        el('div', { style: 'font-size:12px;opacity:0.85' }, [`AI 信頼度: ${Math.round(confidence * 100)}%`]),
+      ] : []),
+      ...(summary ? [
+        el('div', { style: 'font-size:13px;margin-top:6px;line-height:1.7' }, [summary]),
+      ] : []),
+    ]),
+  ]);
+}
+
+function renderDetHit(hit: DeterministicHit): HTMLElement {
+  return renderIssue(hit.severity, hit.category, hit.detail);
+}
+function renderAIIssue(issue: AIIssue): HTMLElement {
+  return renderIssue(issue.severity, issue.category, issue.detail);
+}
+
+function renderIssue(severity: 'high' | 'medium' | 'low', category: string, detail: string): HTMLElement {
+  const palette = {
+    high:   { bg: '#fee2e2', border: '#dc2626', color: '#991b1b', icon: '🔴' },
+    medium: { bg: '#fef3c7', border: '#f59e0b', color: '#92400e', icon: '🟡' },
+    low:    { bg: '#dbeafe', border: '#3b82f6', color: '#1e40af', icon: '🔵' },
+  }[severity];
+  return el('div', {
+    style: `background:${palette.bg};border-left:3px solid ${palette.border};color:${palette.color};`
+         + 'padding:8px 12px;border-radius:0 6px 6px 0;margin-bottom:6px;font-size:13px;line-height:1.6;'
+         + 'display:flex;gap:10px;align-items:flex-start',
+  }, [
+    el('div', { style: 'font-size:14px;line-height:1.4' }, [palette.icon]),
+    el('div', { style: 'flex:1;min-width:0' }, [
+      el('div', { style: 'font-weight:700;margin-bottom:2px' }, [category]),
+      el('div', { style: 'font-size:12px' }, [detail]),
+    ]),
+  ]);
+}

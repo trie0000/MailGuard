@@ -1,0 +1,20 @@
+{
+  "name": "mailguard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "メール誤送信検出ツール — .eml/.msg をドラッグするとAIで宛先と本文の矛盾をチェック",
+  "scripts": {
+    "dev": "node build.js --watch --serve",
+    "build": "node build.js",
+    "type-check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "esbuild": "^0.21.0",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "@kenjiuno/msgreader": "^1.28.0",
+    "dompurify": "^3.1.0"
+  }
+}
