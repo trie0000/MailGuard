@@ -66,30 +66,50 @@ npm run dev             # esbuild --watch + http://localhost:5180
 
 ### ① relay を起動
 
+**Anthropic (Claude API) でテストする場合 ★ Mac 推奨**:
+
 ```bash
-# 環境変数で上流 API キーを渡す (= OpenAI の場合)
-export MG_API_KEY=sk-...
-
-# (任意) 上流ベース URL を変更したい場合
-# export MG_UPSTREAM_BASE=https://api.openai.com    # ← デフォルト
-# export MG_UPSTREAM_BASE=https://<resource>.openai.azure.com   # Azure OpenAI
-# export MG_UPSTREAM_BASE=https://api.together.xyz             # Together AI 等
-
-# (任意) リッスン ポートを変更
-# export MG_PORT=18100   # ← デフォルト
-
-# 起動
+export MG_PROVIDER=anthropic
+export MG_API_KEY=sk-ant-...      # https://console.anthropic.com/ で発行
 npm run relay
 ```
 
-起動すると以下が表示されます:
+→ MailGuard 側の Model 欄に `claude-sonnet-4-5` 等を入力。
+relay が `/v1/chat/completions` を `/v1/messages` に翻訳して上流に転送し、
+レスポンスを OpenAI 形式に戻して返します。MailGuard 側のコード変更は不要。
+
+**OpenAI でテストする場合**:
+
+```bash
+export MG_API_KEY=sk-...           # https://platform.openai.com/api-keys で発行
+npm run relay
+```
+
+**Azure OpenAI / 他の互換プロバイダ**:
+
+```bash
+export MG_UPSTREAM_BASE=https://<resource>.openai.azure.com
+export MG_API_KEY=...
+npm run relay
+```
+
+**ポート変更** (デフォルト 18100):
+
+```bash
+export MG_PORT=18200
+npm run relay
+```
+
+起動すると以下が表示されます (Anthropic の例):
 
 ```
 📨 MailGuard Mac/Linux relay
 ─────────────────────────────────────────
 Listen   : http://127.0.0.1:18100
-Upstream : https://api.openai.com
-API key  : ✓ configured (sk-pro…)
+Provider : Anthropic (Claude)
+Upstream : https://api.anthropic.com
+API key  : ✓ configured (sk-ant-…)
+推奨モデル: claude-sonnet-4-5 / claude-haiku-4-5 / claude-opus-4-5
 ─────────────────────────────────────────
 ```
 
