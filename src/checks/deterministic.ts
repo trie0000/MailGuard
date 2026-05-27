@@ -12,7 +12,7 @@ export function runDeterministicChecks(mail: ParsedMail, settings: Settings): De
   hits.push(...checkConfidentialKeywords(mail, settings));
   hits.push(...checkSalutationVsTo(mail));
   hits.push(...checkSubjectTagInBody(mail));
-  hits.push(...checkDomainShiftFromHistory(mail));
+  hits.push(...checkNewParticipants(mail));
   return hits;
 }
 
@@ -149,26 +149,46 @@ function checkSubjectTagInBody(mail: ParsedMail): DeterministicHit[] {
   }];
 }
 
-// ── 6. 過去履歴の参加者ドメインと新 To のドメイン乖離 ──────────────
-function checkDomainShiftFromHistory(mail: ParsedMail): DeterministicHit[] {
+// ── 6. 過去履歴に登場しない新規参加者 ───────────────────────────────
+//   過去メールの To / Cc / From / 差出人 / 宛先 / 送信者 ヘッダから登場した
+//   全メアド (= ドメインではなく完全一致) を集合化し、新メールの To+Cc に
+//   含まれるメアドが 1 つでも履歴に出てこなければ「新規参加者」として flag。
+//
+//   想定する誤送信:
+//     - 過去の人全員 ＋ 別案件の関係者を Cc にうっかり追加
+//     - 履歴の人と似たメアド (= タイポ) を打って送ろうとしている
+//     - 別人だが Reply-All で広がった先が正当でない可能性
+//
+//   検出基準は「ドメイン」ではなく「メアド完全一致」(= 厳格)。
+function checkNewParticipants(mail: ParsedMail): DeterministicHit[] {
   if (!mail.quotedHistory) return [];
-  // 引用部内の「差出人/From」行から email を抽出
-  const histEmails = Array.from(mail.quotedHistory.matchAll(/(?:差出人|From|送信者)\s*[:：]\s*[^\n]*?<?([\w.+-]+@[\w.-]+\.[A-Za-z]{2,})>?/gi))
-    .map(m => m[1]!.toLowerCase());
-  const histDomains = new Set(histEmails.map(e => e.split('@')[1]!));
-  if (histDomains.size === 0) return [];
-  const toDomains = mail.to.map(t => t.email.split('@')[1]?.toLowerCase()).filter(Boolean) as string[];
-  const novel = toDomains.filter(d => !histDomains.has(d));
-  if (novel.length === 0 || novel.length === toDomains.length && toDomains.length > 0) {
-    // 全部新規ドメイン = 完全にスレッドが切れている可能性
-    if (toDomains.length > 0 && novel.length === toDomains.length) {
-      return [{
-        category: 'ドメイン乖離',
-        severity: 'medium',
-        detail: `To のドメイン (${novel.join(', ')}) が引用履歴の参加者ドメイン (${Array.from(histDomains).join(', ')}) と一致しません — 別案件への返信になっている可能性`,
-      }];
-    }
-    return [];
+
+  // 引用部から To / Cc / From / 差出人 / 宛先 / 送信者 ヘッダ行を抽出
+  //   1 行に複数アドレスが入っているケース (= "To: a@x.com, b@y.com") に対応するため
+  //   ヘッダ行の値を取り出してから email regex で個別抽出する
+  const HEADER_RE = /(?:差出人|送信者|宛先|From|To|Cc)\s*[:：]\s*([^\n]*)/gi;
+  const EMAIL_RE = /[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/g;
+  const known = new Set<string>();
+  let m: RegExpExecArray | null;
+  while ((m = HEADER_RE.exec(mail.quotedHistory)) !== null) {
+    const line = m[1] ?? '';
+    const emails = line.match(EMAIL_RE) ?? [];
+    for (const e of emails) known.add(e.toLowerCase().trim());
   }
-  return [];
+  if (known.size === 0) return [];   // 履歴ヘッダなし (= 比較基準が無いので不発)
+
+  // 新メールの To / Cc を 1 件ずつ照合
+  const recipients = [...mail.to, ...mail.cc];
+  const novel = recipients
+    .map(r => ({ email: r.email.toLowerCase().trim(), name: r.name }))
+    .filter(r => r.email && !known.has(r.email));
+  if (novel.length === 0) return [];
+
+  const novelLabels = novel.map(r => r.name ? `${r.name} <${r.email}>` : r.email);
+  return [{
+    category: '新規参加者',
+    severity: 'high',
+    detail: `過去履歴 (To / Cc / From) に登場しないメアドが宛先に含まれています: `
+          + `${novelLabels.join(', ')}`,
+  }];
 }

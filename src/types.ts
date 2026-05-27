@@ -21,7 +21,7 @@ export interface ParsedMail {
 }
 
 export interface DeterministicHit {
-  category: '内部混入' | 'タイポ' | '機密外部' | '宛名不一致' | '件名タグ不一致' | 'ドメイン乖離';
+  category: '内部混入' | 'タイポ' | '機密外部' | '宛名不一致' | '件名タグ不一致' | '新規参加者';
   severity: 'high' | 'medium' | 'low';
   detail: string;
 }
