@@ -55,7 +55,7 @@ export interface Settings {
 }
 
 export const DEFAULT_SETTINGS: Settings = {
-  relayUrl: 'http://127.0.0.1:18080',
+  relayUrl: 'http://127.0.0.1:18100',
   model: 'gpt-4o-mini',
   apiKey: '',
   ownDomains: [],

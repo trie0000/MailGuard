@@ -58,16 +58,76 @@ npm run build           # → dist/mailguard.html (単一ファイル) を生成
 npm run dev             # esbuild --watch + http://localhost:5180
 ```
 
+## Mac / Linux でテストする (= relay 同梱)
+
+ブラウザは CORS の制約で外部 AI API を直接呼べないので、loopback プロキシ
+(= relay) を経由します。同梱の `relay/mac-relay.mjs` は依存なしで動く Node.js
+製 OpenAI 互換プロキシです (= Spira の PowerShell relay は Windows 専用)。
+
+### ① relay を起動
+
+```bash
+# 環境変数で上流 API キーを渡す (= OpenAI の場合)
+export MG_API_KEY=sk-...
+
+# (任意) 上流ベース URL を変更したい場合
+# export MG_UPSTREAM_BASE=https://api.openai.com    # ← デフォルト
+# export MG_UPSTREAM_BASE=https://<resource>.openai.azure.com   # Azure OpenAI
+# export MG_UPSTREAM_BASE=https://api.together.xyz             # Together AI 等
+
+# (任意) リッスン ポートを変更
+# export MG_PORT=18100   # ← デフォルト
+
+# 起動
+npm run relay
+```
+
+起動すると以下が表示されます:
+
+```
+📨 MailGuard Mac/Linux relay
+─────────────────────────────────────────
+Listen   : http://127.0.0.1:18100
+Upstream : https://api.openai.com
+API key  : ✓ configured (sk-pro…)
+─────────────────────────────────────────
+```
+
+### ② MailGuard を開く
+
+```bash
+# 別ターミナルで dev サーバ起動 (file:// で開いてもよい)
+npm run dev
+# → http://localhost:5180/ にアクセス
+
+# あるいは
+open dist/mailguard.html
+```
+
+ブラウザで MailGuard が開いたら **右上「⚙ 設定」**:
+- **Relay URL**: `http://127.0.0.1:18100`
+- **Model**: `gpt-4o-mini` (= デフォルト) / `gpt-4o` 等
+- **API Key**: (空のままで OK = relay が上流に転送)
+- **自社ドメイン**: 例 `example.co.jp, example.com`
+
+### ③ メールをドロップしてテスト
+
+Outlook (or Mail.app) で返信下書きを `.eml` として保存 →
+MailGuard 画面にドラッグ&ドロップ → 「🤖 AI で誤送信チェック」。
+
 ## 配布
 
 `dist/mailguard.html` を配ればそれで完結。利用者は:
 - ローカルに保存 → ダブルクリックでブラウザで開く
 - もしくは社内 SharePoint / 共有フォルダに配置 → URL でアクセス
 
+社内利用時は Spira の `spira-ai-relay.ps1` (Windows) を流用するか、
+本ツールの `relay/mac-relay.mjs` (Node) をサーバに常駐させる構成も可能。
+
 ## 設定
 
 初回起動時に右上「⚙ 設定」から:
-- **Relay URL**: `http://127.0.0.1:18080` (= spira-ai-relay.ps1 と同じ loopback)
+- **Relay URL**: `http://127.0.0.1:18100` (デフォルト)
 - **Model**: 使用する AI モデル ID (= `gpt-4o-mini` 等)
 - **API Key**: relay 構成によっては不要
 - **自社ドメイン**: 内部メンバー判定に使用 (= 設定しないと内部混入チェックが無効)
