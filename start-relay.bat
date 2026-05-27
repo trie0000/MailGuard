@@ -1,44 +1,42 @@
 @echo off
 REM ============================================================================
-REM MailGuard relay launcher (Windows .bat)
+REM MailGuard relay launcher (Windows)
 REM ============================================================================
 REM
-REM 起動方法:
-REM   このファイルをダブルクリック、または cmd で実行
+REM NOTE: Keep this .bat ASCII-only. cmd.exe parses .bat files using the system
+REM ANSI code page (CP932 on JP Windows), not UTF-8. Japanese text in REM/echo
+REM lines gets mis-decoded and stray bytes (&, |, <, >) can split the line.
+REM All Japanese messages live in mailguard-relay.ps1.
 REM
-REM 必要環境:
-REM   - PowerShell 5.1 以上 (= Windows 10/11 に標準で入っている)
-REM   - Node.js は 不要
+REM What it does:
+REM   1) Start mailguard-relay.ps1 (PowerShell relay)
+REM   2) Listens on http://127.0.0.1:18100 (default; configurable via .env)
 REM
-REM 設定:
-REM   - API キー / 上流 URL / モデル → ブラウザの MailGuard 設定画面で
-REM   - ポート等 → 同じフォルダの .env で (任意)
+REM Required: PowerShell 5.1 or newer (= bundled with Windows 10 / 11).
+REM           Node.js is NOT required.
+REM
+REM Config:   API key / upstream URL / model / provider are set in the
+REM           MailGuard browser UI (Settings panel).
+REM           Port / proxy are read from .env in this folder. See .env.example.
 REM ============================================================================
 
-REM コンソール出力を UTF-8 に
-chcp 65001 > nul
-
-REM スクリプトのあるディレクトリに移動
 cd /d "%~dp0"
 
-REM PowerShell が存在するか確認
 where powershell.exe > nul 2>&1
 if errorlevel 1 (
   echo.
-  echo [!] PowerShell が見つかりません。Windows 標準で入っているはずです。
-  echo     管理者に確認してください。
+  echo [!] PowerShell not found. It ships with Windows 10/11 by default.
+  echo     Please contact your administrator.
   echo.
   pause
   exit /b 1
 )
 
-REM PowerShell relay を起動
-REM -ExecutionPolicy Bypass で社内ポリシーの制約を回避 (= スクリプト署名不要)
+REM -ExecutionPolicy Bypass: skip script signing requirement for THIS process only
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0relay\mailguard-relay.ps1"
 
-REM エラー時はウィンドウを開いたままに
 if errorlevel 1 (
   echo.
-  echo [!] relay が異常終了しました。
+  echo [!] relay exited with an error. See messages above.
   pause
 )

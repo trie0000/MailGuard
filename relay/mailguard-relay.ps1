@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 
 # ============================================================================
 # MailGuard relay (PowerShell 版)
@@ -46,15 +46,13 @@ $ErrorActionPreference = 'Stop'
 #    .env に MG_HTTPS_PROXY=http://proxy.example.com:8080 を書けば最優先で使う
 #    (= 標準の HTTPS_PROXY env も互換でサポート)
 function Initialize-WebProxy {
-    $explicit = if ($env:MG_HTTPS_PROXY) { $env:MG_HTTPS_PROXY }
-                elseif ($env:HTTPS_PROXY) { $env:HTTPS_PROXY }
-                else { '' }
-    if ($explicit) {
+    param([string]$ExplicitProxy)
+    if ($ExplicitProxy) {
         try {
-            $proxy = New-Object System.Net.WebProxy($explicit, $true)
+            $proxy = New-Object System.Net.WebProxy($ExplicitProxy, $true)
             $proxy.Credentials = [System.Net.CredentialCache]::DefaultNetworkCredentials
             [System.Net.WebRequest]::DefaultWebProxy = $proxy
-            Write-Host "[relay] using explicit proxy: $explicit"
+            Write-Host "[relay] using explicit proxy: $ExplicitProxy"
             return
         } catch {
             Write-Host "[!] proxy 設定失敗: $($_.Exception.Message)" -ForegroundColor Yellow
@@ -78,7 +76,7 @@ function Initialize-WebProxy {
         }
     } catch { }
 }
-Initialize-WebProxy
+# 呼び出しは .env 読み込み & 設定値解決の後 (= $proxyUrl が決まってから)
 
 # ── .env ローダ ────────────────────────────────────────────────────────
 function Import-DotEnvFile {
@@ -114,14 +112,35 @@ foreach ($p in $envCandidates) {
     if (Test-Path -LiteralPath $p) { Import-DotEnvFile -Path $p; break }
 }
 
-# ── 設定値 ──────────────────────────────────────────────────────────────
-$port = 18100
-if ($env:MG_PORT) {
-    try { $port = [int]$env:MG_PORT } catch { Write-Host "[!] MG_PORT 不正値: $env:MG_PORT" }
+# ── 設定値 (= .env で上書き可、Spira 互換の変数名) ───────────────────────
+#   優先順位: MAILGUARD_AI_* (= 推奨) → MG_* (= 旧、後方互換) → 既定値
+function Get-EnvAny {
+    param([string[]]$Names, [string]$Default = '')
+    foreach ($n in $Names) {
+        $v = [Environment]::GetEnvironmentVariable($n, 'Process')
+        if ($v) { return $v }
+    }
+    return $Default
 }
-$fallbackApiKey = $env:MG_API_KEY
-$fallbackUpstream = if ($env:MG_UPSTREAM_BASE) { $env:MG_UPSTREAM_BASE.TrimEnd('/') } else { '' }
-$fallbackProvider = if ($env:MG_PROVIDER) { $env:MG_PROVIDER.ToLower() } else { '' }
+
+$port = 18100
+$portStr = Get-EnvAny @('MAILGUARD_AI_PORT', 'MG_PORT')
+if ($portStr) {
+    try { $port = [int]$portStr } catch { Write-Host "[!] 不正なポート値: $portStr (= 18100 を使用)" }
+}
+$fallbackApiKey   = Get-EnvAny @('MAILGUARD_AI_KEY', 'MG_API_KEY')
+$fallbackUpstream = (Get-EnvAny @('MAILGUARD_AI_TARGET', 'MG_UPSTREAM_BASE')).TrimEnd('/')
+$fallbackProvider = (Get-EnvAny @('MAILGUARD_AI_PROVIDER', 'MG_PROVIDER')).ToLower()
+$proxyUrl         = Get-EnvAny @('MAILGUARD_AI_PROXY', 'MG_HTTPS_PROXY', 'HTTPS_PROXY')
+$skipCertCheck    = (Get-EnvAny @('MAILGUARD_AI_SKIP_CERT_CHECK')) -eq '1'
+
+if ($skipCertCheck) {
+    [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { return $true }
+    Write-Host "[!] 警告: TLS 証明書検証を無効化しています (MAILGUARD_AI_SKIP_CERT_CHECK=1)" -ForegroundColor Yellow
+}
+
+# プロキシ初期化 ($proxyUrl が決まったタイミングで)
+Initialize-WebProxy -ExplicitProxy $proxyUrl
 
 # ── CORS / レスポンス ──────────────────────────────────────────────────
 function Set-CorsHeaders {

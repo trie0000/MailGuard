@@ -91,39 +91,36 @@ npm run dev             # esbuild --watch + http://localhost:5180
 
 ### ① relay を起動
 
-**Anthropic (Claude API) でテストする場合 ★ Mac 推奨**:
+通常は **ブラウザ UI で API キー / 上流 URL / プロバイダ を指定する** ため、relay は引数なしで起動するだけで OK:
 
 ```bash
-export MG_PROVIDER=anthropic
-export MG_API_KEY=sk-ant-...      # https://console.anthropic.com/ で発行
 npm run relay
 ```
 
-→ MailGuard 側の Model 欄に `claude-sonnet-4-5` 等を入力。
-relay が `/v1/chat/completions` を `/v1/messages` に翻訳して上流に転送し、
-レスポンスを OpenAI 形式に戻して返します。MailGuard 側のコード変更は不要。
-
-**OpenAI でテストする場合**:
+**社内プロキシ経由が必要な場合** (= 多くの企業環境):
 
 ```bash
-export MG_API_KEY=sk-...           # https://platform.openai.com/api-keys で発行
-npm run relay
-```
-
-**Azure OpenAI / 他の互換プロバイダ**:
-
-```bash
-export MG_UPSTREAM_BASE=https://<resource>.openai.azure.com
-export MG_API_KEY=...
+export MAILGUARD_AI_PROXY=http://proxy.example.com:8080
 npm run relay
 ```
 
 **ポート変更** (デフォルト 18100):
 
 ```bash
-export MG_PORT=18200
+export MAILGUARD_AI_PORT=18200
 npm run relay
 ```
+
+**ブラウザ UI 設定を省略して env で固定したい場合** (= 共有運用用):
+
+```bash
+export MAILGUARD_AI_PROVIDER=claude
+export MAILGUARD_AI_TARGET=https://api.anthropic.com
+export MAILGUARD_AI_KEY=sk-ant-...
+npm run relay
+```
+
+これらの env var を `.env` ファイルに書いておけば `npm run relay` だけで毎回読み込まれます (= `.env.example` 参照)。
 
 起動すると以下が表示されます (Anthropic の例):
 

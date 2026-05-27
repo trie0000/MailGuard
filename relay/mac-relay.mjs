@@ -67,12 +67,19 @@ function loadEnv() {
 }
 loadEnv();
 
-const PORT = parseInt(process.env.MG_PORT || '18100', 10);
+// env var lookup with priority: MAILGUARD_AI_* (= 推奨) → MG_* (= 旧、後方互換)
+function envAny(...names) {
+  for (const n of names) {
+    const v = process.env[n];
+    if (v) return v;
+  }
+  return '';
+}
 
-// 環境変数 fallback (= UI から送られて来ない場合)
-const FALLBACK_API_KEY = process.env.MG_API_KEY || '';
-const FALLBACK_UPSTREAM = process.env.MG_UPSTREAM_BASE || '';
-const FALLBACK_PROVIDER = (process.env.MG_PROVIDER || '').toLowerCase();
+const PORT = parseInt(envAny('MAILGUARD_AI_PORT', 'MG_PORT') || '18100', 10);
+const FALLBACK_API_KEY = envAny('MAILGUARD_AI_KEY', 'MG_API_KEY');
+const FALLBACK_UPSTREAM = envAny('MAILGUARD_AI_TARGET', 'MG_UPSTREAM_BASE');
+const FALLBACK_PROVIDER = envAny('MAILGUARD_AI_PROVIDER', 'MG_PROVIDER').toLowerCase();
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
