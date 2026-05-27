@@ -84,7 +84,7 @@ function Set-CorsHeaders {
     param([System.Net.HttpListenerResponse]$Response)
     $Response.Headers.Add('Access-Control-Allow-Origin', '*')
     $Response.Headers.Add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-    $Response.Headers.Add('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, X-MG-Provider, X-MG-Upstream-Base, x-api-key, anthropic-version')
+    $Response.Headers.Add('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, X-MG-Provider, X-MG-Upstream-Base, X-MG-Deployment, X-MG-Api-Version, x-api-key, anthropic-version, api-key')
     $Response.Headers.Add('Access-Control-Max-Age', '86400')
 }
 
@@ -118,16 +118,22 @@ function Resolve-Context {
 
     $provider = $Request.Headers['X-MG-Provider']
     if (-not $provider) { $provider = $fallbackProvider }
-    if (-not $provider) { $provider = 'openai' }
+    if (-not $provider) { $provider = 'claude' }
     $provider = $provider.ToLower()
-    if ($provider -eq 'claude') { $provider = 'anthropic' }
+    # Spira 互換: 'anthropic' は 'claude' のエイリアス
+    if ($provider -eq 'anthropic') { $provider = 'claude' }
+    # 'openai' は 'corp' のエイリアス (= passthrough する従来モード)
+    if ($provider -eq 'openai') { $provider = 'corp' }
 
     $upstream = $Request.Headers['X-MG-Upstream-Base']
     if (-not $upstream) { $upstream = $fallbackUpstream }
     if (-not $upstream) {
-        $upstream = if ($provider -eq 'anthropic') { 'https://api.anthropic.com' } else { 'https://api.openai.com' }
+        $upstream = if ($provider -eq 'claude') { 'https://api.anthropic.com' } else { 'https://api.openai.com' }
     }
     $upstream = $upstream.TrimEnd('/')
+
+    $deployment = $Request.Headers['X-MG-Deployment']
+    $apiVersion = $Request.Headers['X-MG-Api-Version']
 
     $auth = $Request.Headers['Authorization']
     $apiKey = ''
@@ -141,9 +147,11 @@ function Resolve-Context {
     if (-not $apiKey) { $apiKey = $fallbackApiKey }
 
     return [PSCustomObject]@{
-        Provider = $provider
-        Upstream = $upstream
-        ApiKey   = $apiKey
+        Provider   = $provider
+        Upstream   = $upstream
+        ApiKey     = $apiKey
+        Deployment = $deployment
+        ApiVersion = $apiVersion
     }
 }
 
@@ -154,10 +162,14 @@ function Build-UpstreamHeaders {
         'Accept'       = 'application/json'
     }
     if (-not $Context.ApiKey) { return $h }
-    if ($Context.Provider -eq 'anthropic') {
+    if ($Context.Provider -eq 'claude') {
         $h['x-api-key'] = $Context.ApiKey
         $h['anthropic-version'] = '2023-06-01'
+    } elseif ($Context.Provider -eq 'corp' -and $Context.Deployment) {
+        # Azure OpenAI スタイル: api-key ヘッダ (= Bearer ではない)
+        $h['api-key'] = $Context.ApiKey
     } else {
+        # OpenAI 直接 (= passthrough)
         $h['Authorization'] = "Bearer $($Context.ApiKey)"
     }
     return $h
@@ -307,7 +319,8 @@ function Handle-Chat {
     $body = Read-RequestBody -Request $Request
     $ctx = Resolve-Context -Request $Request
 
-    if ($ctx.Provider -eq 'anthropic') {
+    if ($ctx.Provider -eq 'claude') {
+        # Anthropic Messages API への翻訳
         try {
             $openaiReq = $body | ConvertFrom-Json
         } catch {
@@ -317,7 +330,7 @@ function Handle-Chat {
         $anthropicReq = ConvertTo-AnthropicRequest -OpenAIReq $openaiReq
         $sendBody = $anthropicReq | ConvertTo-Json -Depth 100 -Compress
         $upstreamUrl = "$($ctx.Upstream)/v1/messages"
-        Write-Host "[relay] POST /v1/chat/completions -> $upstreamUrl (anthropic, model=$($anthropicReq.model))"
+        Write-Host "[relay] POST /v1/chat/completions -> $upstreamUrl (claude, model=$($anthropicReq.model))"
 
         $headers = Build-UpstreamHeaders -Context $ctx
         $upstreamResp = Invoke-Upstream -Url $upstreamUrl -Method 'POST' -Headers $headers -Body $sendBody
@@ -333,13 +346,24 @@ function Handle-Chat {
                 Send-Json -Response $Response -StatusCode 502 -Body ('{"error":{"message":"response translation failed: ' + ($_.Exception.Message -replace '"', "'") + '"}}')
             }
         } else {
-            Write-Host "[relay] anthropic HTTP $($upstreamResp.StatusCode): $($upstreamResp.Body.Substring(0, [Math]::Min(200, $upstreamResp.Body.Length)))" -ForegroundColor Yellow
+            $bodyPreview = if ($upstreamResp.Body) { $upstreamResp.Body.Substring(0, [Math]::Min(200, $upstreamResp.Body.Length)) } else { '' }
+            Write-Host "[relay] claude HTTP $($upstreamResp.StatusCode): $bodyPreview" -ForegroundColor Yellow
             Send-Json -Response $Response -StatusCode $upstreamResp.StatusCode -Body $upstreamResp.Body
         }
-    } else {
-        # OpenAI 互換: 透過
+    }
+    elseif ($ctx.Provider -eq 'corp' -and $ctx.Deployment) {
+        # Azure OpenAI 互換: {base}/openai/deployments/{deployment}/chat/completions?api-version=...
+        $apiVer = if ($ctx.ApiVersion) { $ctx.ApiVersion } else { '2024-06-01' }
+        $upstreamUrl = "$($ctx.Upstream)/openai/deployments/$($ctx.Deployment)/chat/completions?api-version=$apiVer"
+        Write-Host "[relay] POST /v1/chat/completions -> $upstreamUrl (corp/azure, $($body.Length) bytes)"
+        $headers = Build-UpstreamHeaders -Context $ctx
+        $upstreamResp = Invoke-Upstream -Url $upstreamUrl -Method 'POST' -Headers $headers -Body $body
+        Send-Json -Response $Response -StatusCode $upstreamResp.StatusCode -Body $upstreamResp.Body
+    }
+    else {
+        # OpenAI 互換 (= passthrough、X-MG-Deployment 無し時のフォールバック)
         $upstreamUrl = "$($ctx.Upstream)/v1/chat/completions"
-        Write-Host "[relay] POST /v1/chat/completions -> $upstreamUrl (openai, $($body.Length) bytes)"
+        Write-Host "[relay] POST /v1/chat/completions -> $upstreamUrl (openai-passthrough, $($body.Length) bytes)"
         $headers = Build-UpstreamHeaders -Context $ctx
         $upstreamResp = Invoke-Upstream -Url $upstreamUrl -Method 'POST' -Headers $headers -Body $body
         Send-Json -Response $Response -StatusCode $upstreamResp.StatusCode -Body $upstreamResp.Body

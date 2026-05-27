@@ -1,6 +1,6 @@
 import { DEFAULT_SETTINGS, Settings } from './types';
 
-const KEY = 'mailguard.settings.v1';
+const KEY = 'mailguard.settings.v2';   // v1 から構造変更したので新キー
 
 export function getSettings(): Settings {
   try {
@@ -10,7 +10,7 @@ export function getSettings(): Settings {
     return {
       ...DEFAULT_SETTINGS,
       ...parsed,
-      provider: (parsed.provider === 'openai' || parsed.provider === 'anthropic')
+      provider: (parsed.provider === 'claude' || parsed.provider === 'corp')
         ? parsed.provider : DEFAULT_SETTINGS.provider,
       ownDomains: parsed.ownDomains ?? DEFAULT_SETTINGS.ownDomains,
       internalKeywords: parsed.internalKeywords ?? DEFAULT_SETTINGS.internalKeywords,

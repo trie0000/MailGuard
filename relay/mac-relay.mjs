@@ -77,7 +77,7 @@ const FALLBACK_PROVIDER = (process.env.MG_PROVIDER || '').toLowerCase();
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, Accept, x-api-key, anthropic-version, X-MG-Provider, X-MG-Upstream-Base',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, Accept, x-api-key, anthropic-version, api-key, X-MG-Provider, X-MG-Upstream-Base, X-MG-Deployment, X-MG-Api-Version',
   'Access-Control-Max-Age': '86400',
 };
 
@@ -106,8 +106,13 @@ const server = http.createServer(async (req, res) => {
 
   if (url.pathname === '/v1/chat/completions' && req.method === 'POST') {
     const ctx = resolveContext(req);
-    if (ctx.provider === 'anthropic') await proxyChatToAnthropic(req, res, ctx);
-    else await proxyOpenAIChat(req, res, ctx);
+    if (ctx.provider === 'claude') {
+      await proxyChatToAnthropic(req, res, ctx);
+    } else if (ctx.provider === 'corp' && ctx.deployment) {
+      await proxyAzureOpenAIChat(req, res, ctx);
+    } else {
+      await proxyOpenAIChat(req, res, ctx);
+    }
     return;
   }
 
@@ -123,20 +128,22 @@ const server = http.createServer(async (req, res) => {
 
 // ── リクエスト ごとの上流 設定解決 ─────────────────────────────────────
 function resolveContext(req) {
-  // 1. ブラウザから X-MG-* / Authorization ヘッダで受け取る
-  const provider = (
-    (req.headers['x-mg-provider'] || '').toString().toLowerCase()
-    || FALLBACK_PROVIDER
-    || 'openai'
-  );
-  const isAnthropic = (provider === 'anthropic' || provider === 'claude');
+  let provider = ((req.headers['x-mg-provider'] || '').toString().toLowerCase()
+    || FALLBACK_PROVIDER || 'claude');
+  // Spira 互換: 'anthropic' は claude のエイリアス、'openai' は corp 互換扱い
+  if (provider === 'anthropic') provider = 'claude';
+  if (provider === 'openai') provider = 'corp';
+
   const upstream = (
     (req.headers['x-mg-upstream-base'] || '').toString()
     || FALLBACK_UPSTREAM
-    || (isAnthropic ? 'https://api.anthropic.com' : 'https://api.openai.com')
+    || (provider === 'claude' ? 'https://api.anthropic.com' : 'https://api.openai.com')
   ).replace(/\/+$/, '');
+
+  const deployment = (req.headers['x-mg-deployment'] || '').toString().trim();
+  const apiVersion = (req.headers['x-mg-api-version'] || '').toString().trim();
   const apiKey = extractBearer(req.headers['authorization']) || FALLBACK_API_KEY;
-  return { provider: isAnthropic ? 'anthropic' : 'openai', upstream, apiKey };
+  return { provider, upstream, deployment, apiVersion, apiKey };
 }
 
 function extractBearer(authHeader) {
@@ -221,13 +228,34 @@ function relayErr(res, err) {
 function buildUpstreamHeaders(ctx) {
   const h = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
   if (!ctx.apiKey) return h;
-  if (ctx.provider === 'anthropic') {
+  if (ctx.provider === 'claude') {
     h['x-api-key'] = ctx.apiKey;
     h['anthropic-version'] = '2023-06-01';
+  } else if (ctx.provider === 'corp' && ctx.deployment) {
+    h['api-key'] = ctx.apiKey;
   } else {
     h['Authorization'] = `Bearer ${ctx.apiKey}`;
   }
   return h;
+}
+
+// ── Azure OpenAI (corp) プロキシ ────────────────────────────────────
+async function proxyAzureOpenAIChat(req, res, ctx) {
+  const body = await readBody(req);
+  const apiVer = ctx.apiVersion || '2024-06-01';
+  const upstreamUrl = new URL(
+    `/openai/deployments/${encodeURIComponent(ctx.deployment)}/chat/completions?api-version=${encodeURIComponent(apiVer)}`,
+    ctx.upstream + '/'
+  );
+  console.log(`[relay] POST /v1/chat/completions -> ${upstreamUrl.href} (corp/azure, ${body.length} bytes)`);
+  const headers = buildUpstreamHeaders(ctx);
+  doUpstream(upstreamUrl, 'POST', headers, body, (upstreamRes, fullBody) => {
+    res.writeHead(upstreamRes.statusCode || 502, {
+      ...CORS,
+      'Content-Type': upstreamRes.headers['content-type'] || 'application/json',
+    });
+    res.end(fullBody);
+  }, (err) => relayErr(res, err));
 }
 
 // ── OpenAI chat/completions → Anthropic messages 変換 ──────────────────

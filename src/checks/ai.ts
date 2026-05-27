@@ -8,7 +8,7 @@
 //
 // 入力サイズが大きいとコスト・遅延が膨らむため、quotedHistory は 4KB 程度に切詰める。
 
-import { ParsedMail, AICheckResult, Settings, DeterministicHit } from '../types';
+import { ParsedMail, AICheckResult, Settings, DeterministicHit, activeModel } from '../types';
 import { chatCompletion } from '../relay/ai-client';
 
 const SYSTEM_PROMPT = `あなたはメール誤送信検出の専門家です。
@@ -50,7 +50,7 @@ export async function runAICheck(
 ): Promise<AICheckResult> {
   const userPrompt = buildUserPrompt(mail, detHits);
   const resp = await chatCompletion(settings, {
-    model: settings.model,
+    model: activeModel(settings),
     temperature: 0.0,
     response_format: { type: 'json_object' },
     messages: [

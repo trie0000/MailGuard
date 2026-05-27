@@ -1,15 +1,20 @@
-// AI ゲートウェイ クライアント (= Azure OpenAI / Anthropic 互換 chat/completions)
+// AI ゲートウェイ クライアント — Spira と同じ "claude / corp" 二系統。
 //
-// relay (= mac-relay.mjs) を経由して上流の AI API にフォワードする。
-// 上流の選択・API キーはブラウザ側 (= Settings) で持っており、relay は受け取った
-// ヘッダ通りに転送する透過プロキシとして動作する。
+// relay (= mailguard-relay.ps1 / mac-relay.mjs) に送る共通エンドポイントは
+// /v1/chat/completions。リクエスト毎にヘッダで上流の差分を渡し、relay 側で
+// 翻訳・URL 組み立てを実施する。
 //
 // 送信ヘッダ:
-//   - Authorization: Bearer <key>           ← 上流の API キー (画面で設定)
-//   - X-MG-Upstream-Base: <URL>             ← 上流のベース URL (画面で設定)
-//   - X-MG-Provider: openai | anthropic     ← プロトコル種別 (= 翻訳要否)
+//   X-MG-Provider: 'claude' | 'corp'
+//   X-MG-Upstream-Base: 上流ベース URL (= claude: api.anthropic.com / corp: ゲートウェイ URL)
+//   X-MG-Deployment: corp 時のみ — Azure OpenAI deployment ID (= prefix + model)
+//   X-MG-Api-Version: corp 時のみ — Azure OpenAI api-version
+//   Authorization: Bearer <API キー>
 
-import { Settings } from '../types';
+import {
+  Settings, activeApiKey, activeModel,
+  corpDeploymentIdFor, corpApiVersionFor,
+} from '../types';
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -17,10 +22,11 @@ export interface ChatMessage {
 }
 
 export interface ChatRequest {
-  model: string;
   messages: ChatMessage[];
   temperature?: number;
   response_format?: { type: 'json_object' };
+  /** 呼出側は model を渡さなくて良い (= settings から自動解決) */
+  model?: string;
 }
 
 export interface ChatResponse {
@@ -34,36 +40,32 @@ function buildHeaders(settings: Settings): Record<string, string> {
     'Content-Type': 'application/json',
     'Accept': 'application/json',
     'X-MG-Provider': settings.provider,
-    'X-MG-Upstream-Base': settings.upstreamBase,
   };
-  if (settings.apiKey) h['Authorization'] = `Bearer ${settings.apiKey}`;
+  const apiKey = activeApiKey(settings);
+  if (apiKey) h['Authorization'] = `Bearer ${apiKey}`;
+
+  if (settings.provider === 'claude') {
+    h['X-MG-Upstream-Base'] = 'https://api.anthropic.com';
+  } else {
+    h['X-MG-Upstream-Base'] = settings.corpBaseUrl;
+    h['X-MG-Deployment'] = corpDeploymentIdFor(settings.corpModel, settings.corpDeployPrefix);
+    h['X-MG-Api-Version'] = corpApiVersionFor(settings.corpModel);
+  }
   return h;
 }
 
 export async function chatCompletion(settings: Settings, req: ChatRequest): Promise<ChatResponse> {
   const url = `${settings.relayUrl.replace(/\/+$/, '')}/v1/chat/completions`;
+  const model = req.model || activeModel(settings);
+  const body = JSON.stringify({ ...req, model });
   const res = await fetch(url, {
     method: 'POST',
     headers: buildHeaders(settings),
-    body: JSON.stringify(req),
+    body,
   });
   if (!res.ok) {
     const t = await res.text();
     throw new Error(`AI relay HTTP ${res.status}: ${t.slice(0, 300)}`);
   }
   return res.json() as Promise<ChatResponse>;
-}
-
-/** relay の /v1/models で利用可能モデルを取得 (= 未対応な relay なら null) */
-export async function fetchModels(settings: Settings): Promise<string[] | null> {
-  try {
-    const url = `${settings.relayUrl.replace(/\/+$/, '')}/v1/models`;
-    const headers = buildHeaders(settings);
-    // GET なので Content-Type は不要
-    delete headers['Content-Type'];
-    const res = await fetch(url, { headers });
-    if (!res.ok) return null;
-    const j = await res.json() as { data?: Array<{ id: string }> };
-    return (j.data ?? []).map(d => d.id).filter(Boolean);
-  } catch { return null; }
 }

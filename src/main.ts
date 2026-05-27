@@ -84,9 +84,12 @@ function settingsBanner(): HTMLElement {
   const s = getSettings();
   const issues: string[] = [];
   if (!s.relayUrl) issues.push('Relay URL 未設定');
-  if (!s.upstreamBase) issues.push('上流 API URL 未設定');
-  if (!s.apiKey) issues.push('API キー 未設定');
-  if (!s.model) issues.push('Model 未設定');
+  if (s.provider === 'claude') {
+    if (!s.claudeApiKey) issues.push('Claude API キー 未設定');
+  } else {
+    if (!s.corpApiKey) issues.push('社内 AI API キー 未設定');
+    if (!s.corpBaseUrl) issues.push('社内 AI ベース URL 未設定');
+  }
   if (s.ownDomains.length === 0) issues.push('自社ドメイン 未設定 (= 内部混入検出が無効)');
   if (issues.length === 0) return el('div');
   return el('div', {

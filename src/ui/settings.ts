@@ -1,9 +1,16 @@
-import { el } from '../utils/dom';
-import { Settings, DEFAULT_SETTINGS } from '../types';
-import { getSettings, setSettings } from '../settings';
-import { fetchModels } from '../relay/ai-client';
+// 設定モーダル — Spira の AI 設定モーダル (src/views/aiSettingsModal.ts) と
+// 同じ二系統 (Claude / Corp) レイアウト + 共通項目。
 
-/** 設定モーダルを開く。閉じる時に最新値を localStorage に保存して onClose 呼出し。 */
+import { el } from '../utils/dom';
+import {
+  Settings, DEFAULT_SETTINGS, Provider,
+  CLAUDE_MODELS, CORP_AI_MODELS,
+} from '../types';
+import { getSettings, setSettings } from '../settings';
+
+const LABEL_STYLE =
+  'color:#7a766c;font-size:13px;align-self:center;justify-self:end;text-align:right;white-space:nowrap';
+
 export function openSettingsModal(onClose: (newSettings: Settings) => void): void {
   const current = getSettings();
 
@@ -13,118 +20,121 @@ export function openSettingsModal(onClose: (newSettings: Settings) => void): voi
   });
 
   const modal = el('div', {
-    style: 'background:#fff;border-radius:12px;width:100%;max-width:600px;padding:24px 28px;'
+    style: 'background:#fff;border-radius:12px;width:100%;max-width:620px;padding:24px 28px;'
          + 'box-shadow:0 10px 40px rgba(0,0,0,0.2)',
   });
 
-  // 入力ヘルパ
-  const inputRow = (label: string, hint: string, value: string, type: 'text' | 'password' = 'text') => {
-    const input = el('input', {
-      type, class: 'mg-input', value,
-      style: 'width:100%;padding:8px 12px;border:1px solid #c0bdb0;border-radius:6px;'
-           + 'font-size:13px;font-family:ui-monospace,Menlo,monospace',
-    }) as HTMLInputElement;
-    const wrap = el('div', { style: 'margin-bottom:14px' }, [
-      el('label', { style: 'display:block;font-size:12px;font-weight:600;color:#2a2a26;margin-bottom:4px' }, [label]),
-      input,
-      el('div', { style: 'font-size:11px;color:#a8a39a;margin-top:3px' }, [hint]),
-    ]);
-    return { wrap, input };
-  };
-
-  const r1 = inputRow('Relay URL (= ローカル loopback)',
-    '例: http://127.0.0.1:18100', current.relayUrl);
-
-  // プロバイダ (= dropdown)
-  const providerSel = el('select', {
-    class: 'mg-select',
-    style: 'width:100%;padding:8px 12px;border:1px solid #c0bdb0;border-radius:6px;font-size:13px;background:#fff',
-  }) as HTMLSelectElement;
-  providerSel.appendChild(el('option', { value: 'anthropic' }, ['Anthropic (Claude)']));
-  providerSel.appendChild(el('option', { value: 'openai' }, ['OpenAI 互換 (= 社内 AI ゲートウェイ含む)']));
-  providerSel.value = current.provider;
-  const r2 = {
-    wrap: el('div', { style: 'margin-bottom:14px' }, [
-      el('label', { style: 'display:block;font-size:12px;font-weight:600;color:#2a2a26;margin-bottom:4px' }, ['プロバイダ']),
-      providerSel,
-      el('div', { style: 'font-size:11px;color:#a8a39a;margin-top:3px' }, [
-        'プロトコル種別。社内 AI ゲートウェイが OpenAI 互換なら OpenAI を選択。',
-      ]),
-    ]),
-  };
-
-  const r3 = inputRow('上流 API ベース URL',
-    '例 (Anthropic): https://api.anthropic.com / 社内 AI ゲートウェイ URL も可',
-    current.upstreamBase);
-
-  const r4 = inputRow('API キー',
-    'Anthropic: sk-ant-... / OpenAI: sk-... / 社内: 管理者発行のキー',
-    current.apiKey, 'password');
-
-  // プロバイダ切替で上流 URL のヒントとデフォルトを動的更新
-  providerSel.addEventListener('change', () => {
-    const provider = providerSel.value;
-    const cur = r3.input.value.trim();
-    if (provider === 'anthropic' && (!cur || /openai\.com$/i.test(cur))) {
-      r3.input.value = 'https://api.anthropic.com';
-    } else if (provider === 'openai' && (!cur || /anthropic\.com$/i.test(cur))) {
-      r3.input.value = 'https://api.openai.com';
+  // ── 共通ヘルパ ────────────────────────────────────────────────────────
+  const inputCss = 'width:100%;padding:7px 10px;border:1px solid #c0bdb0;border-radius:6px;'
+                 + 'font:13px/1.4 ui-monospace,Menlo,monospace;color:#2a2a26;background:#fff';
+  const mkInput = (type: 'text' | 'password' | 'url', placeholder: string, value: string) =>
+    el('input', { type, placeholder, value, style: inputCss }) as HTMLInputElement;
+  const mkSelect = (opts: Array<{ value: string; label: string; selected?: boolean }>) => {
+    const sel = el('select', { style: inputCss }) as HTMLSelectElement;
+    for (const o of opts) {
+      const op = el('option', { value: o.value }, [o.label]);
+      if (o.selected) op.setAttribute('selected', 'selected');
+      sel.appendChild(op);
     }
-  });
+    return sel;
+  };
+  const hint = (text: string) =>
+    el('p', { style: 'font-size:11px;color:#a8a39a;margin:6px 0 0;line-height:1.6' }, [text]);
 
-  const r5 = inputRow('Model (= モデル ID)',
-    '例 (Anthropic): claude-sonnet-4-5 / claude-haiku-4-5 / claude-opus-4-5\n'
-    + '例 (OpenAI):    gpt-4o-mini / gpt-4o',
-    current.model);
-
-  // モデル候補のドロップダウン (= relay 対応時)
-  const modelHint = el('div', { style: 'font-size:11px;color:#a8a39a;margin-top:3px' }, [
-    'relay からモデル取得中…',
+  // ── Provider セレクタ ─────────────────────────────────────────────────
+  const providerSel = mkSelect([
+    { value: 'claude', label: 'Claude (Anthropic)', selected: current.provider === 'claude' },
+    { value: 'corp', label: '社内 AI (Azure OpenAI 互換)', selected: current.provider === 'corp' },
   ]);
-  const refreshModels = async () => {
-    modelHint.textContent = 'relay からモデル取得中…';
-    const snap: Settings = {
-      ...current,
-      relayUrl: r1.input.value,
-      provider: (providerSel.value as 'openai' | 'anthropic'),
-      upstreamBase: r3.input.value,
-      apiKey: r4.input.value,
-    };
-    const models = await fetchModels(snap);
-    if (models && models.length > 0) {
-      const sel = el('select', {
-        style: 'width:100%;padding:8px 12px;border:1px solid #c0bdb0;border-radius:6px;font-size:13px;margin-top:6px',
-        onchange: () => { r5.input.value = sel.value; },
-      }) as HTMLSelectElement;
-      sel.appendChild(el('option', { value: '' }, ['— 候補から選ぶ —']));
-      for (const m of models) sel.appendChild(el('option', { value: m }, [m]));
-      modelHint.replaceWith(sel);
-    } else {
-      modelHint.textContent = '※ relay からモデル一覧を取得できませんでした (手入力してください)';
-    }
+  providerSel.style.width = '280px';
+
+  // ── Claude block ──────────────────────────────────────────────────────
+  const claudeKeyInput = mkInput('password', 'sk-ant-... (Anthropic API キー)', current.claudeApiKey);
+  const claudeModelSel = mkSelect(CLAUDE_MODELS.map(m => ({
+    value: m.id, label: m.label, selected: m.id === current.claudeModel,
+  })));
+  const claudeBlock = el('div', { style: 'margin-top:14px' }, [
+    el('div', {
+      style: 'display:grid;grid-template-columns:120px minmax(0,1fr);gap:10px 14px;align-items:center',
+    }, [
+      el('label', { style: LABEL_STYLE }, ['API キー']),
+      claudeKeyInput,
+      el('label', { style: LABEL_STYLE }, ['モデル']),
+      claudeModelSel,
+    ]),
+    hint('※ ブラウザから relay 経由で Anthropic API を呼び出します。API キーは localStorage に保存されます (= mailguard.settings.v2)。'),
+  ]);
+
+  // ── Corp AI block ─────────────────────────────────────────────────────
+  const corpKeyInput = mkInput('password', 'Azure OpenAI 互換 API キー', current.corpApiKey);
+  const corpBaseUrlInput = mkInput('url', 'https://gateway.example.com/myapi', current.corpBaseUrl);
+  const corpPrefixInput = mkInput('text', 'spira- (deployment id プレフィクス)', current.corpDeployPrefix);
+  const corpModelSel = mkSelect(CORP_AI_MODELS.map(m => ({
+    value: m.id, label: m.id, selected: m.id === current.corpModel,
+  })));
+  const corpBlock = el('div', { style: 'margin-top:14px' }, [
+    el('div', {
+      style: 'display:grid;grid-template-columns:120px minmax(0,1fr);gap:10px 14px;align-items:center',
+    }, [
+      el('label', { style: LABEL_STYLE }, ['API キー']),
+      corpKeyInput,
+      el('label', { style: LABEL_STYLE }, ['ベース URL']),
+      corpBaseUrlInput,
+      el('label', { style: LABEL_STYLE }, ['デプロイ prefix']),
+      corpPrefixInput,
+      el('label', { style: LABEL_STYLE }, ['モデル']),
+      corpModelSel,
+    ]),
+    hint('※ デプロイ ID は <prefix><モデル名 (.除く)> で組み立てます。例: prefix=spira- + gpt-4.1 → spira-gpt-41。\n'
+       + '   api-version は reasoning モデル (gpt-5 / o3 / o4-mini 等) は 2024-12-01-preview、それ以外は 2024-06-01 を自動使用。'),
+  ]);
+
+  // Provider 切替で表示出し分け
+  const blockArea = el('div', { style: 'margin-top:6px' }, [claudeBlock, corpBlock]);
+  const syncVisibility = (): void => {
+    claudeBlock.style.display = providerSel.value === 'claude' ? '' : 'none';
+    corpBlock.style.display = providerSel.value === 'corp' ? '' : 'none';
   };
-  void refreshModels();
-  r5.wrap.appendChild(modelHint);
+  providerSel.addEventListener('change', syncVisibility);
+  syncVisibility();
 
-  const r6 = inputRow('自社ドメイン',
-    'カンマ区切り (例: example.co.jp, example.com)。内部メンバー判定 + 内部混入検出に使用',
-    current.ownDomains.join(', '));
-  const r7 = inputRow('機密キーワード',
-    'カンマ区切り。本文に出現 + 外部宛で high リスク扱い',
-    current.internalKeywords.join(', '));
+  // ── relay URL / 自社ドメイン / 機密キーワード ─────────────────────
+  const relayUrlInput = mkInput('text', DEFAULT_SETTINGS.relayUrl, current.relayUrl);
+  const ownDomainsInput = mkInput('text', 'example.co.jp, example.com', current.ownDomains.join(', '));
+  const keywordsInput = mkInput('text', '社外秘, 機密, ...', current.internalKeywords.join(', '));
 
+  const commonBlock = el('div', { style: 'margin-top:18px;padding-top:14px;border-top:1px solid #e8e4d8' }, [
+    el('div', {
+      style: 'display:grid;grid-template-columns:120px minmax(0,1fr);gap:10px 14px;align-items:center',
+    }, [
+      el('label', { style: LABEL_STYLE }, ['Relay URL']),
+      relayUrlInput,
+      el('label', { style: LABEL_STYLE }, ['自社ドメイン']),
+      ownDomainsInput,
+      el('label', { style: LABEL_STYLE }, ['機密キーワード']),
+      keywordsInput,
+    ]),
+    hint('Relay URL = ローカル loopback (例: http://127.0.0.1:18100)\n'
+       + '自社ドメイン = カンマ区切り。内部混入検出に使用 (= 空だと検出無効)。\n'
+       + '機密キーワード = 本文出現 + 外部宛で high リスク扱い。'),
+  ]);
+
+  // ── ボタン ────────────────────────────────────────────────────────────
   const btnSave = el('button', {
-    style: 'padding:8px 18px;background:#7a8a78;color:#fff;border:0;border-radius:6px;'
+    style: 'padding:9px 22px;background:#7a8a78;color:#fff;border:0;border-radius:6px;'
          + 'font-size:13px;font-weight:600;cursor:pointer',
     onclick: () => {
       const next: Settings = {
-        relayUrl: r1.input.value.trim() || DEFAULT_SETTINGS.relayUrl,
-        provider: (providerSel.value as 'openai' | 'anthropic'),
-        upstreamBase: r3.input.value.trim() || DEFAULT_SETTINGS.upstreamBase,
-        apiKey: r4.input.value.trim(),
-        model: r5.input.value.trim() || DEFAULT_SETTINGS.model,
-        ownDomains: r6.input.value.split(',').map(s => s.trim()).filter(Boolean),
-        internalKeywords: r7.input.value.split(',').map(s => s.trim()).filter(Boolean),
+        relayUrl: relayUrlInput.value.trim() || DEFAULT_SETTINGS.relayUrl,
+        provider: providerSel.value as Provider,
+        claudeApiKey: claudeKeyInput.value.trim(),
+        claudeModel: claudeModelSel.value || DEFAULT_SETTINGS.claudeModel,
+        corpApiKey: corpKeyInput.value.trim(),
+        corpModel: corpModelSel.value || DEFAULT_SETTINGS.corpModel,
+        corpBaseUrl: corpBaseUrlInput.value.trim().replace(/\/+$/, ''),
+        corpDeployPrefix: corpPrefixInput.value.trim(),
+        ownDomains: ownDomainsInput.value.split(',').map(s => s.trim()).filter(Boolean),
+        internalKeywords: keywordsInput.value.split(',').map(s => s.trim()).filter(Boolean),
         typoDomains: current.typoDomains,
       };
       setSettings(next);
@@ -133,25 +143,28 @@ export function openSettingsModal(onClose: (newSettings: Settings) => void): voi
     },
   }, ['保存']);
   const btnCancel = el('button', {
-    style: 'padding:8px 18px;background:#fff;color:#7a766c;border:1px solid #c0bdb0;'
+    style: 'padding:9px 18px;background:#fff;color:#7a766c;border:1px solid #c0bdb0;'
          + 'border-radius:6px;font-size:13px;cursor:pointer',
     onclick: () => { overlay.remove(); },
   }, ['キャンセル']);
 
-  modal.appendChild(el('h2', { style: 'margin:0 0 6px;font-size:18px;font-weight:700' }, ['⚙ 設定']));
-  modal.appendChild(el('p', { style: 'margin:0 0 18px;font-size:12px;color:#7a766c;line-height:1.6' }, [
-    'localStorage に保存されます (= このブラウザのみ)。',
+  // ── 組み立て ────────────────────────────────────────────────────────
+  modal.appendChild(el('h2', { style: 'margin:0 0 4px;font-size:18px;font-weight:700' }, ['⚙ AI 設定']));
+  modal.appendChild(el('p', { style: 'margin:0 0 14px;font-size:12px;color:#7a766c;line-height:1.6' }, [
+    'プロバイダ (Claude / 社内 AI) と API キー / モデル / 社内 AI のベース URL ・ デプロイプレフィクスを設定します。',
     el('br'),
-    'API キー / 上流 URL / プロバイダ はリクエストごとに relay 経由で上流に渡されます。',
+    '設定は localStorage に保存されます (= このブラウザのみ)。',
   ]));
-  modal.appendChild(r1.wrap);
-  modal.appendChild(r2.wrap);
-  modal.appendChild(r3.wrap);
-  modal.appendChild(r4.wrap);
-  modal.appendChild(r5.wrap);
-  modal.appendChild(r6.wrap);
-  modal.appendChild(r7.wrap);
-  modal.appendChild(el('div', { style: 'display:flex;gap:10px;justify-content:flex-end;margin-top:20px' }, [
+
+  modal.appendChild(el('div', {
+    style: 'display:grid;grid-template-columns:120px minmax(0,1fr);gap:10px 14px;align-items:center',
+  }, [
+    el('label', { style: LABEL_STYLE }, ['プロバイダ']),
+    providerSel,
+  ]));
+  modal.appendChild(blockArea);
+  modal.appendChild(commonBlock);
+  modal.appendChild(el('div', { style: 'display:flex;gap:10px;justify-content:flex-end;margin-top:22px' }, [
     btnCancel, btnSave,
   ]));
   overlay.appendChild(modal);
