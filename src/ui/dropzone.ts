@@ -3,6 +3,7 @@ import { ParsedMail } from '../types';
 import { parseEml } from '../parser/eml';
 import { parseMsg } from '../parser/msg';
 import { parseRawText } from '../parser/raw-text';
+import { openOutlookPastePrompt } from './outlook-prompt';
 
 export interface DropzoneOpts {
   onMail: (mail: ParsedMail) => void;
@@ -25,7 +26,7 @@ export function createDropzone(opts: DropzoneOpts): HTMLElement {
       '.eml / .msg をドロップ or クリックで選択',
     ]),
     el('div', { style: 'font-size:12px;color:#7a766c;line-height:1.6' }, [
-      'Outlook → ファイル → 名前を付けて保存 → eml/msg 形式で保存',
+      'Outlook メール一覧 / メッセージ ウィンドウから直接ドロップも可',
     ]),
     el('input', {
       type: 'file', accept: '.eml,.msg,message/rfc822,application/vnd.ms-outlook',
@@ -70,8 +71,6 @@ export function createDropzone(opts: DropzoneOpts): HTMLElement {
          + 'resize:vertical;color:#2a2a26;min-height:120px;margin-bottom:12px',
   }) as HTMLTextAreaElement;
   pasteArea.addEventListener('paste', () => {
-    // テキストが貼り付けられたら即座にパースを試みる
-    // (= ユーザが追加で textarea 内に書き足すケースは想定しない)
     setTimeout(() => {
       const text = pasteArea.value;
       if (!text.trim()) return;
@@ -96,57 +95,145 @@ export function createDropzone(opts: DropzoneOpts): HTMLElement {
 }
 
 // ── ドロップ ハンドリング ────────────────────────────────────────────
-//   1. dataTransfer.files があれば .eml / .msg として読込
-//   2. なければ text/plain / text/html を確認 → 貼り付け扱い
-//   3. それでもダメな場合はデバッグ ログを出して案内
-async function handleDrop(e: DragEvent, opts: DropzoneOpts): Promise<void> {
+//   優先順位:
+//   1. dataTransfer.files / items の file kind → .eml / .msg として読込
+//   2. text/plain / text/html / text/uri-list が 500 文字以上 → raw eml パース
+//   3. items.string (= async API) を非同期で集める → 同上
+//   4. Outlook っぽい drag を検出 → 案内モーダルを開いて利用者に paste させる
+//   5. それ以外は generic な onError 表示
+//
+//  Mac Outlook は (1)(2)(3) 全部失敗するケースが多い (= 件名だけ、または空のドラッグ)
+//  ため、(4) のフォールバックが重要。
+//
+//  dataTransfer は drop イベントの同期処理中しか有効でないので、必要情報を
+//  全て同期的にスナップショットしてから async 処理する。
+function handleDrop(e: DragEvent, opts: DropzoneOpts): void {
   const dt = e.dataTransfer;
   if (!dt) {
     opts.onError('ドラッグ データを取得できませんでした');
     return;
   }
 
-  console.group('[mailguard] drop event diagnostics');
-  console.log('types:', Array.from(dt.types));
-  console.log('items:', Array.from(dt.items).map(i => ({ kind: i.kind, type: i.type })));
-  console.log('files:', Array.from(dt.files).map(f => ({ name: f.name, type: f.type, size: f.size })));
-  console.groupEnd();
+  const types = Array.from(dt.types);
+  const filesSnap = Array.from(dt.files);
+  const itemsSnap = Array.from(dt.items).map(i => ({ kind: i.kind, type: i.type, item: i }));
+  const syncText: Record<string, string> = {};
+  for (const t of types) syncText[t] = dt.getData(t);
 
-  if (dt.files && dt.files.length > 0) {
-    await handleFile(dt.files[0]!, opts);
-    return;
+  const stringPromises: Promise<{ type: string; text: string }>[] = [];
+  for (const it of itemsSnap) {
+    if (it.kind === 'string') {
+      stringPromises.push(new Promise(resolve => {
+        it.item.getAsString(text => resolve({ type: it.type, text }));
+      }));
+    }
   }
-
-  // テキストとして取得を試す (= Mac Outlook が pasteboard 経由でテキストを渡すケース)
-  for (const fmt of ['text/plain', 'text/html', 'text/uri-list']) {
-    const txt = dt.getData(fmt);
-    if (txt && txt.length > 50) {
-      try {
-        const mail = parseRawText(stripHtmlIfNeeded(txt, fmt));
-        opts.onMail(mail);
-        return;
-      } catch (err) {
-        console.warn('[mailguard] paste fallback parse failed:', (err as Error).message);
-      }
+  const itemFiles: File[] = [];
+  for (const it of itemsSnap) {
+    if (it.kind === 'file') {
+      const f = it.item.getAsFile();
+      if (f) itemFiles.push(f);
     }
   }
 
+  console.group('[mailguard] drop event diagnostics');
+  console.log('types:', types);
+  console.log('items:', itemsSnap.map(i => ({ kind: i.kind, type: i.type })));
+  console.log('files:', filesSnap.map(f => ({ name: f.name, type: f.type, size: f.size })));
+  console.log('item-files:', itemFiles.map(f => ({ name: f.name, type: f.type, size: f.size })));
+  console.log('sync-text-lengths:', Object.fromEntries(
+    Object.entries(syncText).map(([k, v]) => [k, v.length]),
+  ));
+  console.groupEnd();
+
+  void processDropAsync({ types, filesSnap, itemFiles, syncText, stringPromises }, opts);
+}
+
+interface DropSnapshot {
+  types: string[];
+  filesSnap: File[];
+  itemFiles: File[];
+  syncText: Record<string, string>;
+  stringPromises: Promise<{ type: string; text: string }>[];
+}
+
+async function processDropAsync(snap: DropSnapshot, opts: DropzoneOpts): Promise<void> {
+  // 1. ファイル (= 通常パターン)
+  const file = snap.filesSnap[0] ?? snap.itemFiles[0];
+  if (file && file.size > 0) {
+    await handleFile(file, opts);
+    return;
+  }
+
+  // 2. 同期取得した text/* で十分な長さなら raw eml パースを試す
+  const syncBest = pickBest(snap.syncText);
+  if (syncBest && syncBest.text.length >= 500) {
+    if (tryParseText(syncBest.text, syncBest.type, opts)) return;
+  }
+
+  // 3. items.string (async) を全部集める
+  const asyncTexts = await Promise.all(snap.stringPromises);
+  const asyncMap: Record<string, string> = {};
+  for (const at of asyncTexts) if (at.text) asyncMap[at.type] = at.text;
+  const asyncBest = pickBest(asyncMap);
+  if (asyncBest && asyncBest.text.length >= 500) {
+    if (tryParseText(asyncBest.text, asyncBest.type, opts)) return;
+  }
+
+  // 4. Outlook っぽいドラッグ or 短いテキストしか無い → 案内モーダル
+  const hint = (asyncBest?.text || syncBest?.text || '').slice(0, 500);
+  const looksOutlook = detectOutlook(snap.types, hint);
+  if (looksOutlook || snap.types.length > 0) {
+    openOutlookPastePrompt({
+      onMail: opts.onMail,
+      hint: hint.length >= 30 ? '' : hint,    // 件名だけ等のノイズは pre-fill しない
+      detectedTypes: snap.types,
+    });
+    return;
+  }
+
+  // 5. 完全に何もない (= 非常に稀)
   opts.onError(
-    'ドラッグされたデータをメールとして認識できませんでした。\n\n'
-    + '【Mac Outlook の対処法】\n'
-    + '  方法 1: Outlook → ファイル → 名前を付けて保存 → .eml で保存 → そのファイルをドロップ\n'
-    + '  方法 2: Outlook で表示メニュー → メッセージのソース → 全選択 → コピー → 下の枠に貼り付け\n'
-    + '\n'
-    + '【受信したドラッグ データ形式】 ' + Array.from(dt.types).join(', '),
+    'ドラッグされたデータをメールとして認識できませんでした。\n'
+    + '対処: Outlook → ファイル → 名前を付けて保存 → .eml で保存 → そのファイルをドロップ',
   );
 }
 
-function stripHtmlIfNeeded(text: string, fmt: string): string {
-  if (fmt !== 'text/html') return text;
-  // 簡易的に HTML タグを剥がす (= 詳細解析は parseRawText 側で)
+function pickBest(texts: Record<string, string>): { type: string; text: string } | null {
+  let best: { type: string; text: string } | null = null;
+  for (const [t, v] of Object.entries(texts)) {
+    if (!v) continue;
+    if (!best || v.length > best.text.length) best = { type: t, text: v };
+  }
+  return best;
+}
+
+function tryParseText(text: string, type: string, opts: DropzoneOpts): boolean {
+  try {
+    const cleaned = type === 'text/html' ? stripHtmlIfNeeded(text) : text;
+    const mail = parseRawText(cleaned);
+    opts.onMail(mail);
+    return true;
+  } catch (err) {
+    console.warn('[mailguard] parseRawText failed:', (err as Error).message);
+    return false;
+  }
+}
+
+function stripHtmlIfNeeded(html: string): string {
   const tmp = document.createElement('div');
-  tmp.innerHTML = text;
-  return (tmp.textContent || '').replace(/ /g, ' ');
+  tmp.innerHTML = html;
+  return (tmp.textContent || '').replace(/ /g, ' ');
+}
+
+/** ドラッグ元が Outlook っぽいかを推定する。
+ *  - 既知の専用 MIME / UTI (= application/x-mac-outlook-data, dyn.*, message/rfc822 等)
+ *  - text に件名らしき 'Re:' / 'Fwd:' / 'RE:' 頭字 */
+function detectOutlook(types: string[], hint: string): boolean {
+  const t = types.join(' ').toLowerCase();
+  if (/outlook|x-mac-outlook|dyn\.|com\.microsoft|message\/rfc822|com\.apple\.mail/i.test(t)) return true;
+  if (/^\s*(re|fw|fwd|aw|tr)\s*:/i.test(hint)) return true;
+  return false;
 }
 
 async function handleFile(file: File, opts: DropzoneOpts): Promise<void> {
