@@ -1,8 +1,31 @@
 // .msg (Outlook 専用バイナリ形式) パーサ — @kenjiuno/msgreader 流用
+//
+// ★ esbuild の __toESM(..., 1) interop の挙動で default 二重ラップが起きる
+//   ケースがあり、`import MsgReader from '@kenjiuno/msgreader'` → バンドル後に
+//   `Ee.default is not constructor` 例外を吐く。namespace import + 動的アンラップ
+//   で確実にクラスを取り出す。
 
-import MsgReader from '@kenjiuno/msgreader';
+import * as MsgReaderModule from '@kenjiuno/msgreader';
 import { ParsedMail } from '../types';
 import { splitLatestAndQuoted, parseAddress } from './common';
+
+/** バンドラーの interop 差異を吸収して MsgReader クラスを取り出す。
+ *   - 通常 ESM-CJS interop: mod.default が class
+ *   - esbuild isNodeMode=1 wraps: mod.default.default が class (= 我々が踏んだバグ)
+ *   - bare namespace: mod 自身が class */
+function resolveMsgReaderClass(): new (buf: ArrayBuffer) => { getFileData(): unknown } {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const mod: any = MsgReaderModule;
+  if (typeof mod === 'function') return mod;
+  if (mod.default && typeof mod.default === 'function') return mod.default;
+  if (mod.default && mod.default.default && typeof mod.default.default === 'function') {
+    return mod.default.default;
+  }
+  if (mod.MsgReader && typeof mod.MsgReader === 'function') return mod.MsgReader;
+  throw new Error('MsgReader クラスをパッケージから解決できませんでした (= 内部 import エラー)');
+}
+
+const MsgReader = resolveMsgReaderClass();
 
 interface MsgRecipient {
   name?: string;
