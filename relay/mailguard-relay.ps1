@@ -522,8 +522,32 @@ try {
 } catch {
     Write-Host ''
     Write-Host "[!] HttpListener.Start() に失敗しました: $($_.Exception.Message)" -ForegroundColor Red
-    Write-Host '   ポート競合 (= 他のプロセスが使用中) の可能性があります。'
-    Write-Host '   .env で MG_PORT=18200 等に変更してください。'
+    # ポート競合の検知 (= 二重起動が一番ありがち)
+    $portInUse = $false
+    try {
+        $conn = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
+        if ($conn) {
+            $portInUse = $true
+            Write-Host '' -ForegroundColor Yellow
+            Write-Host "[!] ポート $port は既に別プロセスが使用中:" -ForegroundColor Yellow
+            foreach ($c in $conn) {
+                $procName = '?'
+                try { $procName = (Get-Process -Id $c.OwningProcess -ErrorAction Stop).ProcessName } catch { }
+                Write-Host "       PID=$($c.OwningProcess) ($procName)" -ForegroundColor Yellow
+            }
+            Write-Host ''
+            Write-Host "    対処 (どちらか):" -ForegroundColor Yellow
+            Write-Host "      A. 既存の relay (= 別ウィンドウで起動中) を Ctrl+C で停止 → このスクリプトを再起動"
+            Write-Host "      B. 強制終了: Stop-Process -Id $($conn[0].OwningProcess) -Force"
+            Write-Host "      C. このインスタンスは別ポートで起動: .env に MAILGUARD_AI_PORT=18200 等を設定"
+        }
+    } catch { }
+    if (-not $portInUse) {
+        Write-Host '' -ForegroundColor Yellow
+        Write-Host '    対処:' -ForegroundColor Yellow
+        Write-Host '      - ポート権限: HttpListener が 127.0.0.1 のバインドを拒否される稀なケース'
+        Write-Host '      - .env で MAILGUARD_AI_PORT=18200 等に変更してみる'
+    }
     Write-Host ''
     exit 1
 }
