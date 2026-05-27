@@ -17,7 +17,7 @@
 #   - 旧 env (MG_API_KEY / MG_UPSTREAM_BASE / MG_PROVIDER) は fallback として読む
 #
 # 起動:
-#   Windows: start-relay.bat ダブルクリック
+#   Windows: MailGuard.bat ダブルクリック
 #   直接:    powershell -NoProfile -ExecutionPolicy Bypass -File relay\mailguard-relay.ps1
 #
 # 必要環境:

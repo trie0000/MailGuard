@@ -65,7 +65,7 @@ npm run dev             # esbuild --watch + http://localhost:5180
 
 | OS | 実装 | 起動方法 |
 |---|---|---|
-| **Windows** | `relay/mailguard-relay.ps1` (PowerShell 5.1+) | `start-relay.bat` ダブルクリック |
+| **Windows** | `relay/mailguard-relay.ps1` (PowerShell 5.1+) | `MailGuard.bat` ダブルクリック |
 | **Mac / Linux** | `relay/mac-relay.mjs` (Node.js) | `./start-relay.sh` |
 
 **依存パッケージなし** — Windows なら PowerShell だけ、Mac/Linux なら Node.js
@@ -75,7 +75,7 @@ npm run dev             # esbuild --watch + http://localhost:5180
 
 1. PowerShell 5.1 以上が入っていることを確認 (= Windows 10/11 はデフォルトで OK)
 2. リポジトリをクローン or ZIP ダウンロード → 解凍
-3. `start-relay.bat` をダブルクリック
+3. `MailGuard.bat` をダブルクリック
 4. 黒いウィンドウに以下が出れば成功:
 
 ```

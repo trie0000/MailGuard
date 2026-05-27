@@ -20,14 +20,14 @@ MailGuard/
 │   └── mailguard.html              ← ブラウザで開く UI 本体
 ├── relay/
 │   └── mailguard-relay.ps1         ← PowerShell 製の loopback プロキシ
-├── start-relay.bat                 ← 起動用バッチ
+├── MailGuard.bat                 ← 起動用バッチ
 ├── .env                            ← 組織共通設定 (admin 設定済み)
 └── SETUP.md                        ← このファイル
 ```
 
 ## ② 起動
 
-`start-relay.bat` を **ダブルクリック**。
+`MailGuard.bat` を **ダブルクリック**。
 
 正常起動すると:
 1. 黒い cmd ウィンドウが開いて relay の起動ログが表示される
@@ -61,7 +61,7 @@ cmd ウィンドウは **閉じないでください** (= 閉じると relay が
 
 ### relay が起動しない
 
-`start-relay.bat` の黒画面にエラーが出ます。よくあるケース:
+`MailGuard.bat` の黒画面にエラーが出ます。よくあるケース:
 
 - **二重起動**: 別の cmd で既に起動中。「ポート 18100 は既に別プロセスが使用中」と出るので、
   指示通り Ctrl+C で既存を止めるか、強制終了

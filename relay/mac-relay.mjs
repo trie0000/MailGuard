@@ -15,7 +15,7 @@
 //     後方互換のため fallback として読む (= ブラウザから来ない場合の最終手段)
 //
 // 起動 (Windows):
-//   start-relay.bat をダブルクリック
+//   MailGuard.bat をダブルクリック
 //
 // 起動 (Mac/Linux):
 //   node relay/mac-relay.mjs        (= 直接実行)
