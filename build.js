@@ -68,6 +68,46 @@ async function run() {
     fs.writeFileSync('dist/mailguard.html', html);
     const sizeKb = (s) => (fs.statSync(s).size / 1024).toFixed(1);
     console.log(`[html] dist/mailguard.html: ${sizeKb('dist/mailguard.html')} KB`);
+
+    // ── 配布物 を dist/ に集約 ───────────────────────────────────────
+    //   利用者は dist/ をそのまま zip して配布 → 解凍 → MailGuard.bat
+    //   ダブルクリックで使える。
+    //   ファイル構成 (フラット):
+    //     dist/
+    //       MailGuard.bat            ← 起動用 (= source からコピー)
+    //       mailguard.html           ← UI (= esbuild が生成)
+    //       mailguard-relay.ps1      ← PowerShell relay (= relay/ からコピー)
+    //       .env.example             ← 設定例 (= source からコピー)
+    //       SETUP.md                 ← 利用者向け手順 (= source からコピー)
+    const distAssets = [
+      { from: 'MailGuard.bat',           to: 'dist/MailGuard.bat' },
+      { from: 'relay/mailguard-relay.ps1', to: 'dist/mailguard-relay.ps1' },
+      { from: '.env.example',            to: 'dist/.env.example' },
+      { from: 'SETUP.md',                to: 'dist/SETUP.md' },
+    ];
+    for (const a of distAssets) {
+      if (fs.existsSync(a.from)) {
+        fs.copyFileSync(a.from, a.to);
+        console.log(`[copy] ${a.from} → ${a.to} (${sizeKb(a.to)} KB)`);
+      } else {
+        console.warn(`[copy] WARN: ${a.from} が見つかりません`);
+      }
+    }
+    // 中間ファイル (= esbuild の生 .js / .map) を dist から削除
+    //  mailguard.html に inline 済みなので、配布には不要。
+    for (const intermediate of ['dist/mailguard.js', 'dist/mailguard.js.map']) {
+      if (fs.existsSync(intermediate)) {
+        fs.unlinkSync(intermediate);
+        console.log(`[clean] removed ${intermediate}`);
+      }
+    }
+
+    console.log('');
+    console.log('  ✓ dist/ に配布物を集約しました (= 配布に必要な全ファイル)。');
+    console.log('  ▶ 配布手順: dist/ フォルダを zip して共有');
+    console.log('  ▶ 利用者: 展開 → MailGuard.bat ダブルクリック (npm 不要)');
+    console.log('');
+
     // dev/index.html (for npm run dev)
     fs.mkdirSync('dev', { recursive: true });
     fs.writeFileSync('dev/index.html', `<!doctype html><html><head><meta charset="utf-8"><title>MailGuard dev</title></head><body><script src="/dist/mailguard.js"></script></body></html>`);
