@@ -36,6 +36,50 @@ $ErrorActionPreference = 'Stop'
 # TLS 1.2 を有効化 (= PS 5.1 デフォルトでは 1.0 まで)
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
+# ── プロキシ設定 (= 社内環境対応) ──────────────────────────────────────
+#  PowerShell の HttpWebRequest はデフォルトでシステム プロキシ
+#  (= IE / Edge の設定) を参照するが、認証 (Negotiate / NTLM) が要る場合に
+#  Credentials を渡さないと 407 や TimeoutException になる。
+#  ここで一括設定し、以降の全 WebRequest に効かせる。
+#
+#  明示指定:
+#    .env に MG_HTTPS_PROXY=http://proxy.example.com:8080 を書けば最優先で使う
+#    (= 標準の HTTPS_PROXY env も互換でサポート)
+function Initialize-WebProxy {
+    $explicit = if ($env:MG_HTTPS_PROXY) { $env:MG_HTTPS_PROXY }
+                elseif ($env:HTTPS_PROXY) { $env:HTTPS_PROXY }
+                else { '' }
+    if ($explicit) {
+        try {
+            $proxy = New-Object System.Net.WebProxy($explicit, $true)
+            $proxy.Credentials = [System.Net.CredentialCache]::DefaultNetworkCredentials
+            [System.Net.WebRequest]::DefaultWebProxy = $proxy
+            Write-Host "[relay] using explicit proxy: $explicit"
+            return
+        } catch {
+            Write-Host "[!] proxy 設定失敗: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+    # システム プロキシに既定資格情報を付与
+    try {
+        $sysProxy = [System.Net.WebRequest]::DefaultWebProxy
+        if ($sysProxy) {
+            $sysProxy.Credentials = [System.Net.CredentialCache]::DefaultNetworkCredentials
+            # 検出されたシステム プロキシを表示 (= デバッグ用)
+            try {
+                $testUri = [Uri]'https://api.anthropic.com'
+                $resolved = $sysProxy.GetProxy($testUri)
+                if ($resolved -and $resolved.AbsoluteUri -ne $testUri.AbsoluteUri) {
+                    Write-Host "[relay] system proxy detected: $($resolved.AbsoluteUri)"
+                } else {
+                    Write-Host "[relay] system proxy: direct (= プロキシなし)"
+                }
+            } catch { }
+        }
+    } catch { }
+}
+Initialize-WebProxy
+
 # ── .env ローダ ────────────────────────────────────────────────────────
 function Import-DotEnvFile {
     param([string]$Path)
@@ -186,7 +230,9 @@ function Invoke-Upstream {
 
     $req = [System.Net.HttpWebRequest]::Create($Url)
     $req.Method = $Method
-    $req.Timeout = 90000
+    # AI 推論は長い (= reasoning モデルだと 60s+) ので timeout を 3 分に
+    $req.Timeout = 180000
+    $req.ReadWriteTimeout = 180000
 
     foreach ($k in $Headers.Keys) {
         $v = $Headers[$k]
@@ -218,15 +264,35 @@ function Invoke-Upstream {
         $resp.Close()
     } catch [System.Net.WebException] {
         if ($_.Exception.Response) {
+            # HTTP エラー応答が来た場合 (= 4xx/5xx) は upstream の本文を透過
             $statusCode = [int]$_.Exception.Response.StatusCode
             $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream(), [System.Text.Encoding]::UTF8)
             $respBody = $reader.ReadToEnd()
             $reader.Close()
             $_.Exception.Response.Close()
         } else {
-            return [PSCustomObject]@{ StatusCode = 502; Body = '{"error":{"message":"upstream error: ' + ($_.Exception.Message -replace '"', "'") + '"}}' }
+            # 通信エラー (タイムアウト / DNS / 接続拒否 等) は status で分類して案内
+            $status = $_.Exception.Status
+            $hint = ''
+            if ($status -eq [System.Net.WebExceptionStatus]::Timeout) {
+                $hint = 'タイムアウト (180s)。 ' +
+                    '社内プロキシ環境の場合は .env に MG_HTTPS_PROXY=http://proxy:port を設定。 ' +
+                    'または IE のプロキシ設定が正しいか確認してください。'
+            } elseif ($status -eq [System.Net.WebExceptionStatus]::NameResolutionFailure) {
+                $hint = 'DNS 解決失敗。 上流 URL のホスト名が正しいか確認してください。'
+            } elseif ($status -eq [System.Net.WebExceptionStatus]::ConnectFailure) {
+                $hint = '接続失敗。 上流ホストにアクセスできません (ファイアウォール / プロキシ)。'
+            } elseif ($status -eq [System.Net.WebExceptionStatus]::TrustFailure) {
+                $hint = 'TLS / 証明書 エラー。 社内プロキシで MITM 証明書が必要かもしれません。'
+            } else {
+                $hint = "通信エラー (status=$status)。 .env に MG_HTTPS_PROXY を設定すれば社内プロキシ経由になります。"
+            }
+            $detail = ($_.Exception.Message -replace '"', "'") + ' / ' + $hint
+            Write-Host "[relay] upstream error: $detail" -ForegroundColor Yellow
+            return [PSCustomObject]@{ StatusCode = 502; Body = '{"error":{"message":"' + $detail + '","upstream":"' + ($Url -replace '"', "'") + '"}}' }
         }
     } catch {
+        Write-Host "[relay] unexpected error: $($_.Exception.Message)" -ForegroundColor Yellow
         return [PSCustomObject]@{ StatusCode = 502; Body = '{"error":{"message":"upstream error: ' + ($_.Exception.Message -replace '"', "'") + '"}}' }
     }
 
