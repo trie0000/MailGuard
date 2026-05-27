@@ -10,6 +10,8 @@ export function getSettings(): Settings {
     return {
       ...DEFAULT_SETTINGS,
       ...parsed,
+      provider: (parsed.provider === 'openai' || parsed.provider === 'anthropic')
+        ? parsed.provider : DEFAULT_SETTINGS.provider,
       ownDomains: parsed.ownDomains ?? DEFAULT_SETTINGS.ownDomains,
       internalKeywords: parsed.internalKeywords ?? DEFAULT_SETTINGS.internalKeywords,
       typoDomains: parsed.typoDomains ?? DEFAULT_SETTINGS.typoDomains,

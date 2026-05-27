@@ -1,5 +1,13 @@
-// AI ゲートウェイ クライアント (= Azure OpenAI 互換 chat/completions)
-// Spira の relay (= spira-ai-relay.ps1) 経由で社内ゲートウェイにフォワード。
+// AI ゲートウェイ クライアント (= Azure OpenAI / Anthropic 互換 chat/completions)
+//
+// relay (= mac-relay.mjs) を経由して上流の AI API にフォワードする。
+// 上流の選択・API キーはブラウザ側 (= Settings) で持っており、relay は受け取った
+// ヘッダ通りに転送する透過プロキシとして動作する。
+//
+// 送信ヘッダ:
+//   - Authorization: Bearer <key>           ← 上流の API キー (画面で設定)
+//   - X-MG-Upstream-Base: <URL>             ← 上流のベース URL (画面で設定)
+//   - X-MG-Provider: openai | anthropic     ← プロトコル種別 (= 翻訳要否)
 
 import { Settings } from '../types';
 
@@ -21,16 +29,22 @@ export interface ChatResponse {
   usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
 }
 
-export async function chatCompletion(settings: Settings, req: ChatRequest): Promise<ChatResponse> {
-  const url = `${settings.relayUrl.replace(/\/+$/, '')}/v1/chat/completions`;
-  const headers: Record<string, string> = {
+function buildHeaders(settings: Settings): Record<string, string> {
+  const h: Record<string, string> = {
     'Content-Type': 'application/json',
     'Accept': 'application/json',
+    'X-MG-Provider': settings.provider,
+    'X-MG-Upstream-Base': settings.upstreamBase,
   };
-  if (settings.apiKey) headers['Authorization'] = `Bearer ${settings.apiKey}`;
+  if (settings.apiKey) h['Authorization'] = `Bearer ${settings.apiKey}`;
+  return h;
+}
+
+export async function chatCompletion(settings: Settings, req: ChatRequest): Promise<ChatResponse> {
+  const url = `${settings.relayUrl.replace(/\/+$/, '')}/v1/chat/completions`;
   const res = await fetch(url, {
     method: 'POST',
-    headers,
+    headers: buildHeaders(settings),
     body: JSON.stringify(req),
   });
   if (!res.ok) {
@@ -44,8 +58,9 @@ export async function chatCompletion(settings: Settings, req: ChatRequest): Prom
 export async function fetchModels(settings: Settings): Promise<string[] | null> {
   try {
     const url = `${settings.relayUrl.replace(/\/+$/, '')}/v1/models`;
-    const headers: Record<string, string> = { Accept: 'application/json' };
-    if (settings.apiKey) headers['Authorization'] = `Bearer ${settings.apiKey}`;
+    const headers = buildHeaders(settings);
+    // GET なので Content-Type は不要
+    delete headers['Content-Type'];
     const res = await fetch(url, { headers });
     if (!res.ok) return null;
     const j = await res.json() as { data?: Array<{ id: string }> };

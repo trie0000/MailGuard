@@ -46,9 +46,11 @@ export interface CombinedResult {
 }
 
 export interface Settings {
-  relayUrl: string;          // 例: http://127.0.0.1:18080
-  model: string;             // 例: gpt-4o-mini
-  apiKey: string;            // (relay 構成によっては不要)
+  relayUrl: string;          // 例: http://127.0.0.1:18100 (= loopback)
+  upstreamBase: string;      // 例: https://api.anthropic.com / 社内 AI ゲートウェイ URL
+  provider: 'openai' | 'anthropic'; // プロトコル種別
+  model: string;             // 例: gpt-4o-mini / claude-sonnet-4-5
+  apiKey: string;            // 上流 API キー (= 画面で設定、relay は読まない)
   ownDomains: string[];       // 自社ドメイン (= 内部判定用)
   internalKeywords: string[];// 機密キーワード辞書
   typoDomains: Record<string, string>; // タイポ辞書 (= bad → correct)
@@ -56,7 +58,9 @@ export interface Settings {
 
 export const DEFAULT_SETTINGS: Settings = {
   relayUrl: 'http://127.0.0.1:18100',
-  model: 'gpt-4o-mini',
+  upstreamBase: 'https://api.anthropic.com',
+  provider: 'anthropic',
+  model: 'claude-sonnet-4-5',
   apiKey: '',
   ownDomains: [],
   internalKeywords: ['社外秘', '機密', 'マル秘', '秘扱', '人事評価', '給与', '社内限り', 'Confidential', 'Internal Only'],
