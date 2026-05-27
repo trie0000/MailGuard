@@ -10,12 +10,85 @@ export interface DropzoneOpts {
   onError: (msg: string) => void;
 }
 
+// ── グローバル ドラッグ ハンドラ (= ウィンドウ全体で drop を受け付ける) ──
+//   旧コードは dropzone div の上でしか dragover を preventDefault してなかったので
+//   Outlook 等の外部 drag をブラウザが「🚫 受け付けない」と表示する問題があった。
+//   document レベルで preventDefault + dropEffect='copy' を返すことで、どこに
+//   ドロップされても drop イベントが発火する状態にする。
+let globalSetupDone = false;
+function setupGlobalDragHandlers(opts: DropzoneOpts): void {
+  if (globalSetupDone) return;
+  globalSetupDone = true;
+
+  let dragDepth = 0;
+  const overlay = createDragOverlay();
+
+  document.addEventListener('dragenter', (e) => {
+    e.preventDefault();
+    dragDepth++;
+    if (dragDepth === 1) {
+      document.body.appendChild(overlay);
+    }
+  });
+
+  document.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+  });
+
+  document.addEventListener('dragleave', (e) => {
+    // dragleave は子要素間遷移でも発火するので、relatedTarget が null
+    // (= ウィンドウから完全に出た) もしくは depth が 0 以下になった時だけ非表示。
+    if (!e.relatedTarget) {
+      dragDepth = 0;
+      overlay.remove();
+    } else {
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (dragDepth === 0) overlay.remove();
+    }
+  });
+
+  document.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dragDepth = 0;
+    overlay.remove();
+    handleDrop(e, opts);
+  });
+}
+
+function createDragOverlay(): HTMLElement {
+  return el('div', {
+    style: 'position:fixed;inset:0;background:rgba(122,138,120,0.15);z-index:900;'
+         + 'border:6px dashed #7a8a78;pointer-events:none;'
+         + 'display:flex;align-items:center;justify-content:center',
+  }, [
+    el('div', {
+      style: 'background:#fff;padding:32px 48px;border-radius:14px;'
+           + 'box-shadow:0 16px 48px rgba(0,0,0,0.2);text-align:center',
+    }, [
+      el('div', { style: 'font-size:64px;line-height:1;margin-bottom:12px' }, ['📥']),
+      el('div', { style: 'font-size:18px;font-weight:700;color:#2a2a26;margin-bottom:6px' }, [
+        'ここにドロップしてください',
+      ]),
+      el('div', { style: 'font-size:13px;color:#7a766c;line-height:1.6' }, [
+        'ファイルでなくても OK — Outlook の場合は案内モーダルが開きます',
+      ]),
+    ]),
+  ]);
+}
+
 /** ドラッグ&ドロップ / クリックでファイル選択 / 貼り付け (paste) / 直接入力
  *  の 4 経路でメール下書きを受け取る入力 UI。
  *
  *  Mac Outlook (= 特に New Outlook for Mac) はドラッグ&ドロップが効かない
- *  ケースが多いため、paste / 直接入力の経路を併設している。 */
+ *  ケースが多いため、paste / 直接入力の経路を併設している。
+ *
+ *  ★ ウィンドウ全体で drag を受け付けるよう document レベルの handler も登録。
+ *    旧版は dropzone div の上だけで dragover.preventDefault() していたため、
+ *    Outlook の drag をブラウザが「受け付けない」(= 🚫 カーソル) 表示になる
+ *    バグがあった。 */
 export function createDropzone(opts: DropzoneOpts): HTMLElement {
+  setupGlobalDragHandlers(opts);
   const dropEl = el('div', {
     class: 'mg-dropzone',
     style: 'border:2px dashed #c0bdb0;border-radius:12px;padding:36px 24px;text-align:center;'
@@ -83,11 +156,38 @@ export function createDropzone(opts: DropzoneOpts): HTMLElement {
     }, 0);
   });
 
+  // ── Outlook ドラッグが効かない時の救済ボタン ────────────────────
+  const manualPasteBtn = el('button', {
+    style: 'width:100%;padding:12px 16px;background:#fff;color:#7a766c;'
+         + 'border:1px dashed #c0bdb0;border-radius:10px;font-size:13px;cursor:pointer;'
+         + 'margin-bottom:12px;line-height:1.6;text-align:center;transition:all 0.15s',
+    onmouseenter: function (this: HTMLElement) {
+      this.style.background = '#f3f1ea';
+      this.style.borderColor = '#7a8a78';
+    },
+    onmouseleave: function (this: HTMLElement) {
+      this.style.background = '#fff';
+      this.style.borderColor = '#c0bdb0';
+    },
+    onclick: () => {
+      openOutlookPastePrompt({ onMail: opts.onMail });
+    },
+  }, [
+    el('div', { style: 'font-size:20px;line-height:1;margin-bottom:4px' }, ['📋']),
+    el('div', { style: 'font-weight:600;color:#2a2a26' }, [
+      'メール ソースを貼り付けて取り込み',
+    ]),
+    el('div', { style: 'font-size:11px;color:#7a766c;margin-top:2px' }, [
+      'Outlook ドラッグが効かない場合 (= Mac Outlook 等) はこちら',
+    ]),
+  ]);
+
   const wrapper = el('div', { class: 'mg-drop-wrapper' }, [
     dropEl,
     el('div', {
       style: 'font-size:11px;color:#a8a39a;text-align:center;margin:6px 0 8px;line-height:1.6',
     }, ['────────  または  ────────']),
+    manualPasteBtn,
     pasteArea,
   ]);
 
