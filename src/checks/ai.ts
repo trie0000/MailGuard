@@ -8,8 +8,8 @@
 //
 // 入力サイズが大きいとコスト・遅延が膨らむため、quotedHistory は 4KB 程度に切詰める。
 
-import { ParsedMail, AICheckResult, Settings, DeterministicHit, activeModel } from '../types';
-import { chatCompletion } from '../relay/ai-client';
+import { ParsedMail, AICheckResult, Settings, DeterministicHit, activeModel, supportsTemperature } from '../types';
+import { chatCompletion, ChatRequest } from '../relay/ai-client';
 
 const SYSTEM_PROMPT = `あなたはメール誤送信検出の専門家です。
 日本のビジネスメールを中心に、ヘッダ / 本文 / 過去履歴を比較して
@@ -49,15 +49,19 @@ export async function runAICheck(
   settings: Settings,
 ): Promise<AICheckResult> {
   const userPrompt = buildUserPrompt(mail, detHits);
-  const resp = await chatCompletion(settings, {
+  // reasoning モデル (= gpt-5 / o3 / o4-mini 系) は temperature カスタム値を
+  // 受け付けず、明示するとエラー (= "temperature does not support 0 with this model")
+  // になるため、条件付きで省略する。
+  const req: ChatRequest = {
     model: activeModel(settings),
-    temperature: 0.0,
     response_format: { type: 'json_object' },
     messages: [
       { role: 'system', content: SYSTEM_PROMPT },
       { role: 'user', content: userPrompt },
     ],
-  });
+  };
+  if (supportsTemperature(settings)) req.temperature = 0.0;
+  const resp = await chatCompletion(settings, req);
   const content = resp.choices?.[0]?.message?.content ?? '';
   return parseAIResponse(content);
 }

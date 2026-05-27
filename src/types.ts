@@ -133,6 +133,17 @@ export function corpApiVersionFor(model: string): string {
   return info?.reasoning ? '2024-12-01-preview' : '2024-06-01';
 }
 
+/** 現在の設定で temperature カスタム値が送れるか?
+ *  ★ Azure/OpenAI の reasoning モデル (= gpt-5 / o3 / o4-mini 系) は
+ *    "temperature does not support 0 with this model. Only the default (1)
+ *    value is supported." を返すため、これらでは temperature 自体を省略する。
+ *  Claude は 0〜1 を普通に受け付けるので true。 */
+export function supportsTemperature(s: Settings): boolean {
+  if (s.provider === 'claude') return true;
+  const info = CORP_AI_MODELS.find(m => m.id === s.corpModel);
+  return !info?.reasoning;
+}
+
 declare global {
   const __MG_BUILD_ID__: string;
 }
