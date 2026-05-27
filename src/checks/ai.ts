@@ -22,8 +22,9 @@ export async function runAICheck(
   settings: Settings,
   recipientInfo: RecipientInfo[] = [],
   similarCandidates: RecipientInfo[] = [],
+  pastParticipantInfo: RecipientInfo[] = [],
 ): Promise<AICheckResult> {
-  const userPrompt = buildUserPrompt(mail, detHits, recipientInfo, similarCandidates);
+  const userPrompt = buildUserPrompt(mail, detHits, recipientInfo, similarCandidates, pastParticipantInfo);
   // ★ system プロンプトは settings.systemPrompt が空文字なら組込デフォルトに fallback。
   //   設定画面の textarea で利用者が自由にカスタマイズできる。
   const systemPrompt = (settings.systemPrompt ?? '').trim() || DEFAULT_SYSTEM_PROMPT;
@@ -53,6 +54,7 @@ function buildUserPrompt(
   detHits: DeterministicHit[],
   recipientInfo: RecipientInfo[],
   similarCandidates: RecipientInfo[],
+  pastParticipantInfo: RecipientInfo[],
 ): string {
   const trunc = (s: string, max: number) => s.length > max ? s.slice(0, max) + '\n…(以下省略)' : s;
   const fmtAddr = (a: { name: string; email: string }) => a.name ? `${a.name} <${a.email}>` : a.email;
@@ -88,19 +90,32 @@ function buildUserPrompt(
     '【添付ファイル名】',
     mail.attachments.length === 0 ? '(なし)' : mail.attachments.join(', '),
     '',
-    // ★ Outlook GAL から取得した宛先の組織情報 (= 同姓 別部署 検出に使う)
-    '【宛先の組織情報 (Outlook GAL より)】',
+    // ★ Outlook GAL から取得した「今回の宛先」の組織情報
+    '【今回の宛先の組織情報 (Outlook GAL より)】',
     recipientInfo.length === 0
       ? '(取得なし — Outlook 未起動 or 全員外部)'
       : recipientInfo.map(r => '  - ' + formatRecipientInfo(r)).join('\n'),
+    '',
+    // ★ 過去履歴 (引用部) に登場した参加者の組織情報 — 「今回 To と過去参加者の部署比較」用
+    '【過去履歴の参加者の組織情報 (= 引用部 From/To/Cc を GAL 解決)】',
+    pastParticipantInfo.length === 0
+      ? '(過去履歴に GAL 解決できる参加者なし)'
+      : pastParticipantInfo.map(r => '  - ' + formatRecipientInfo(r)).join('\n'),
+    '',
+    '★ 重要なクロスチェック:',
+    '   - 今回 To/Cc の部署と 過去参加者の部署 が大きく違う → 同姓別部署の取り違え疑い (high)',
+    '   - 件名 (subject) や 本文の話題 が 今回 To の部署と不整合 → 部署不一致 (high)',
+    '   - 添付ファイル名 や 件名 が 過去参加者の組織 と整合してるのに今回 To が違う → high',
+    '   例: 過去は tanaka.jiro@sales (営業部) と "案件 A" でやり取り。',
+    '       件名「案件 A 見積もり」 だが 今回 To は tanaka.taro@hr (人事部) → 強警告',
     '',
     // 同姓 別人候補 (= 「○○様」 を抜いて GAL を検索した結果)
     similarCandidates.length === 0
       ? ''
       : '【同姓別人候補 (= GAL 内の同名・別メアド)】\n'
         + similarCandidates.map(r => '  - ' + formatRecipientInfo(r)).join('\n')
-        + '\n  ★ 本文宛名と To のメアドが上記候補の中で正しい人物を指しているか'
-        + '本文の話題・部署と整合するか厳密に確認してください。\n',
+        + '\n  ★ 本文宛名と To のメアドが上記候補の中で正しい人物を指しているか、'
+        + '本文の話題・件名・過去履歴の話題と部署が整合するか厳密に確認してください。\n',
     '【決定論ルールによる事前検出】',
     detSummary,
     '',

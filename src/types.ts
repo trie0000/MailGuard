@@ -47,6 +47,8 @@ export interface CombinedResult {
   recipientInfo?: RecipientInfo[];
   /** 同姓 別人候補 (= GAL の lastName / displayName 部分一致) */
   similarNameCandidates?: RecipientInfo[];
+  /** 過去履歴 (= 引用部) に登場した参加者の GAL 情報 */
+  pastParticipantInfo?: RecipientInfo[];
 }
 
 // ── Outlook GAL 解決結果 ─────────────────────────────────────────────

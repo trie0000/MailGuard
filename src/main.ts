@@ -176,37 +176,63 @@ async function runChecks(mail: ParsedMail): Promise<void> {
   const settings = getSettings();
   const det = runDeterministicChecks(mail, settings);
 
-  // ── Outlook GAL 連携 (Phase 1-2-3-5): 宛先全員を resolve + 同姓検索 ────────
-  // 並列実行で待ち時間最小化。relay 未起動 / Outlook 未起動なら静かにスキップ。
-  const allRecipients = [...mail.to, ...mail.cc].map(r => r.email).filter(Boolean);
+  // ── Outlook GAL 連携 ──────────────────────────────────────────────────
+  //   ★ 過去履歴に出てくる参加者も同時に GAL resolve することで、AI に
+  //     「過去は営業部の人と話してたのに今回は人事部に投げてる」のような
+  //     "過去と現在の所属差異" 検出をさせる。
+  const currentRecipients = [...mail.to, ...mail.cc].map(r => r.email).filter(Boolean);
+  const pastParticipantEmails = extractPastParticipantEmails(mail.quotedHistory, currentRecipients);
   const salutation = extractSalutation(mail.latestReply);
   const lastNameForSearch = extractLastNameToken(salutation);
 
-  const [recipientInfo, similarCandidates] = await Promise.all([
-    batchResolveRecipients(settings, allRecipients).catch(() => []),
+  const [recipientInfo, pastParticipantInfo, similarCandidates] = await Promise.all([
+    batchResolveRecipients(settings, currentRecipients).catch(() => []),
+    pastParticipantEmails.length > 0
+      ? batchResolveRecipients(settings, pastParticipantEmails).catch(() => [])
+      : Promise.resolve([]),
     lastNameForSearch
       ? searchSimilarName(settings, lastNameForSearch, mail.to[0]?.email, 10).catch(() => [])
       : Promise.resolve([]),
   ]);
-  console.log('[mailguard] GAL resolved:', recipientInfo, '/ similar candidates:', similarCandidates);
+  console.log('[mailguard] GAL — current:', recipientInfo,
+    '/ past participants:', pastParticipantInfo,
+    '/ similar candidates:', similarCandidates);
 
-  // ── AI チェック (Phase 4): 解析結果を GAL 情報と共に渡す ────────────────
+  // ── AI チェック: 全情報を渡す ──────────────────────────────────────
   let aiResult: CombinedResult['ai'];
   try {
-    aiResult = await runAICheck(mail, det, settings, recipientInfo, similarCandidates);
+    aiResult = await runAICheck(mail, det, settings, recipientInfo, similarCandidates, pastParticipantInfo);
   } catch (e) {
     aiResult = { error: (e as Error).message };
   }
 
   clear(resHost);
-  // 結果表示 (Phase 6): GAL 情報も渡す
   resHost.appendChild(renderResult({
     deterministic: det,
     ai: aiResult,
     recipientInfo,
     similarNameCandidates: similarCandidates,
+    pastParticipantInfo,
   }));
   resHost.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+/** 引用部 (= 過去履歴) のヘッダ行から メアドを抽出。
+ *  現在の To/Cc に既に含まれてるメアドは除外 (= 重複 resolve を避ける)。
+ *  対象ヘッダ: From / 差出人 / 送信者 / To / 宛先 / Cc */
+function extractPastParticipantEmails(quotedHistory: string, currentRecipients: string[]): string[] {
+  if (!quotedHistory) return [];
+  const HEADER_RE = /(?:差出人|送信者|宛先|From|To|Cc)\s*[:：]\s*([^\n]*)/gi;
+  const EMAIL_RE = /[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/g;
+  const set = new Set<string>();
+  let m: RegExpExecArray | null;
+  while ((m = HEADER_RE.exec(quotedHistory)) !== null) {
+    const line = m[1] ?? '';
+    const emails = line.match(EMAIL_RE) ?? [];
+    for (const e of emails) set.add(e.toLowerCase().trim());
+  }
+  const current = new Set(currentRecipients.map(e => e.toLowerCase().trim()));
+  return Array.from(set).filter(e => !current.has(e));
 }
 
 /** 「○○様」 から GAL 検索用の苗字 トークンを抽出。

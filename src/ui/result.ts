@@ -31,8 +31,9 @@ export function renderResult(result: CombinedResult): HTMLElement {
         : el('div', {}, result.deterministic.map(renderDetHit)),
     ]),
 
-    // Outlook GAL 解決結果 (= 部署 / 役職 / 同姓候補)
-    ...(result.recipientInfo || result.similarNameCandidates ? [renderGalSection(result)] : []),
+    // Outlook GAL 解決結果 (= 部署 / 役職 / 同姓候補 / 過去参加者)
+    ...(result.recipientInfo || result.similarNameCandidates || result.pastParticipantInfo
+       ? [renderGalSection(result)] : []),
 
     // AI 結果
     el('div', { style: 'margin-top:18px' }, [
@@ -96,15 +97,26 @@ function renderAIIssue(issue: AIIssue): HTMLElement {
 // ── Outlook GAL 解決結果セクション ────────────────────────────────────
 function renderGalSection(result: CombinedResult): HTMLElement {
   const info = result.recipientInfo || [];
+  const past = result.pastParticipantInfo || [];
   const similar = result.similarNameCandidates || [];
   const resolvedCount = info.filter(r => r.resolved).length;
   return el('div', { style: 'margin-top:18px' }, [
     sectionHeader('📇 宛先の組織情報 (Outlook GAL)',
-      `${resolvedCount} / ${info.length} 件解決`
+      `今回 ${resolvedCount}/${info.length}`
+      + (past.length > 0 ? ` / 過去参加者 ${past.filter(r => r.resolved).length}/${past.length}` : '')
       + (similar.length > 0 ? ` / 同姓候補 ${similar.length}` : '')),
+    el('div', { style: 'font-size:11px;color:#a8a39a;margin-bottom:6px' }, ['【今回の宛先】']),
     info.length === 0
       ? el('div', { style: 'font-size:13px;color:#7a766c;padding:6px 0' }, ['(取得なし)'])
       : el('div', {}, info.map(r => renderRecipientRow(r))),
+
+    ...(past.length > 0 ? [
+      el('div', { style: 'font-size:11px;color:#a8a39a;margin:10px 0 6px' }, [
+        '【過去履歴の参加者】 (= 引用部から抽出、AI が今回宛先との所属差をチェック)',
+      ]),
+      el('div', {}, past.map(r => renderRecipientRow(r))),
+    ] : []),
+
     ...(similar.length > 0 ? [
       el('div', { style: 'margin-top:10px;padding:10px 12px;background:#fef3c7;border-left:3px solid #f59e0b;border-radius:0 6px 6px 0' }, [
         el('div', { style: 'font-size:12px;font-weight:700;color:#92400e;margin-bottom:6px' }, [
