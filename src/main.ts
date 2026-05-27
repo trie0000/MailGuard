@@ -17,6 +17,8 @@ import { renderResult } from './ui/result';
 import { openSettingsModal } from './ui/settings';
 import { runDeterministicChecks } from './checks/deterministic';
 import { runAICheck } from './checks/ai';
+import { batchResolveRecipients, searchSimilarName } from './relay/outlook-client';
+import { extractSalutation } from './checks/deterministic';
 
 const root = document.getElementById('mailguard-root');
 if (!root) throw new Error('#mailguard-root not found');
@@ -168,22 +170,64 @@ async function runChecks(mail: ParsedMail): Promise<void> {
     style: 'padding:20px;text-align:center;color:#7a766c;font-size:13px',
   }, [
     el('div', { style: 'font-size:28px;margin-bottom:8px' }, ['⏳']),
-    'AI に問合せ中… (= 10〜30 秒)',
+    'GAL 問合せ + AI 解析中… (= 数秒〜30 秒)',
   ]));
 
   const settings = getSettings();
   const det = runDeterministicChecks(mail, settings);
 
+  // ── Outlook GAL 連携 (Phase 1-2-3-5): 宛先全員を resolve + 同姓検索 ────────
+  // 並列実行で待ち時間最小化。relay 未起動 / Outlook 未起動なら静かにスキップ。
+  const allRecipients = [...mail.to, ...mail.cc].map(r => r.email).filter(Boolean);
+  const salutation = extractSalutation(mail.latestReply);
+  const lastNameForSearch = extractLastNameToken(salutation);
+
+  const [recipientInfo, similarCandidates] = await Promise.all([
+    batchResolveRecipients(settings, allRecipients).catch(() => []),
+    lastNameForSearch
+      ? searchSimilarName(settings, lastNameForSearch, mail.to[0]?.email, 10).catch(() => [])
+      : Promise.resolve([]),
+  ]);
+  console.log('[mailguard] GAL resolved:', recipientInfo, '/ similar candidates:', similarCandidates);
+
+  // ── AI チェック (Phase 4): 解析結果を GAL 情報と共に渡す ────────────────
   let aiResult: CombinedResult['ai'];
   try {
-    aiResult = await runAICheck(mail, det, settings);
+    aiResult = await runAICheck(mail, det, settings, recipientInfo, similarCandidates);
   } catch (e) {
     aiResult = { error: (e as Error).message };
   }
 
   clear(resHost);
-  resHost.appendChild(renderResult({ deterministic: det, ai: aiResult }));
+  // 結果表示 (Phase 6): GAL 情報も渡す
+  resHost.appendChild(renderResult({
+    deterministic: det,
+    ai: aiResult,
+    recipientInfo,
+    similarNameCandidates: similarCandidates,
+  }));
   resHost.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+/** 「○○様」 から GAL 検索用の苗字 トークンを抽出。
+ *   - "田中様" → "田中"
+ *   - "田中太郎様" → "田中" (= 先頭の漢字 2 文字)
+ *   - "ABC 株式会社 田中様" → "田中"
+ *   - 英語 "Dear Mr. Tanaka" → "Tanaka"
+ *   抽出できなければ null。 */
+function extractLastNameToken(salutation: string | null): string | null {
+  if (!salutation) return null;
+  // 末尾の敬称を剥がす
+  const stripped = salutation.replace(/(様|御中|殿|さん|さま|Mr\.?|Ms\.?|Mrs\.?|Dr\.?)$/i, '').trim();
+  if (!stripped) return null;
+  // 「ABC 株式会社 田中」 のような形なら最後のトークン (= 個人名と推定)
+  // または "Dear Mr. Tanaka" の "Tanaka" 部分
+  const tokens = stripped.split(/[\s 　,、・]+/).filter(t => t.length >= 2);
+  if (tokens.length === 0) return null;
+  const last = tokens[tokens.length - 1]!;
+  // 「株式会社」「有限会社」等の組織名は除外
+  if (/(株式|有限|合同|合資)会社$/.test(last)) return null;
+  return last;
 }
 
 // 開発時の console 露出 (= テスト時に直接叩けるように)

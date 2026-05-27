@@ -1,5 +1,5 @@
 import { el } from '../utils/dom';
-import { CombinedResult, DeterministicHit, AIIssue } from '../types';
+import { CombinedResult, DeterministicHit, AIIssue, RecipientInfo } from '../types';
 
 export function renderResult(result: CombinedResult): HTMLElement {
   const aiOk = !('error' in result.ai);
@@ -30,6 +30,9 @@ export function renderResult(result: CombinedResult): HTMLElement {
         ? el('div', { style: 'font-size:13px;color:#7a766c;padding:6px 0' }, ['(検出なし)'])
         : el('div', {}, result.deterministic.map(renderDetHit)),
     ]),
+
+    // Outlook GAL 解決結果 (= 部署 / 役職 / 同姓候補)
+    ...(result.recipientInfo || result.similarNameCandidates ? [renderGalSection(result)] : []),
 
     // AI 結果
     el('div', { style: 'margin-top:18px' }, [
@@ -88,6 +91,60 @@ function renderDetHit(hit: DeterministicHit): HTMLElement {
 }
 function renderAIIssue(issue: AIIssue): HTMLElement {
   return renderIssue(issue.severity, issue.category, issue.detail);
+}
+
+// ── Outlook GAL 解決結果セクション ────────────────────────────────────
+function renderGalSection(result: CombinedResult): HTMLElement {
+  const info = result.recipientInfo || [];
+  const similar = result.similarNameCandidates || [];
+  const resolvedCount = info.filter(r => r.resolved).length;
+  return el('div', { style: 'margin-top:18px' }, [
+    sectionHeader('📇 宛先の組織情報 (Outlook GAL)',
+      `${resolvedCount} / ${info.length} 件解決`
+      + (similar.length > 0 ? ` / 同姓候補 ${similar.length}` : '')),
+    info.length === 0
+      ? el('div', { style: 'font-size:13px;color:#7a766c;padding:6px 0' }, ['(取得なし)'])
+      : el('div', {}, info.map(r => renderRecipientRow(r))),
+    ...(similar.length > 0 ? [
+      el('div', { style: 'margin-top:10px;padding:10px 12px;background:#fef3c7;border-left:3px solid #f59e0b;border-radius:0 6px 6px 0' }, [
+        el('div', { style: 'font-size:12px;font-weight:700;color:#92400e;margin-bottom:6px' }, [
+          `⚠ 同姓候補 (GAL に同名の別人が ${similar.length} 名います)`,
+        ]),
+        el('div', {}, similar.map(r => renderRecipientRow(r, true))),
+      ]),
+    ] : []),
+  ]);
+}
+
+function renderRecipientRow(r: RecipientInfo, isCandidate = false): HTMLElement {
+  const palette = !r.resolved
+    ? { bg: '#fafaf7', border: '#c0bdb0', color: '#7a766c', icon: '◌' }
+    : r.type === 'exchange-user'
+      ? (isCandidate
+        ? { bg: '#fef3c7', border: '#f59e0b', color: '#7c2d12', icon: '🔍' }
+        : { bg: '#dbeafe', border: '#3b82f6', color: '#1e40af', icon: '🟢' })
+      : { bg: '#f3f1ea', border: '#a8a39a', color: '#7a766c', icon: '🌐' };
+  const parts: HTMLElement[] = [];
+  parts.push(el('div', { style: 'font-weight:700;font-size:13px' }, [r.email]));
+  if (r.resolved) {
+    const meta: string[] = [];
+    if (r.displayName) meta.push(r.displayName);
+    if (r.department) meta.push('部署: ' + r.department);
+    if (r.jobTitle) meta.push('役職: ' + r.jobTitle);
+    if (r.officeLocation) meta.push('拠点: ' + r.officeLocation);
+    if (r.manager) meta.push('上長: ' + r.manager);
+    parts.push(el('div', { style: 'font-size:12px;margin-top:2px;color:' + palette.color + ';opacity:0.9' }, [meta.join(' / ') || '(詳細なし)']));
+  } else {
+    parts.push(el('div', { style: 'font-size:12px;margin-top:2px;color:' + palette.color }, ['(GAL 未解決 / 外部メアド)']));
+  }
+  return el('div', {
+    style: `background:${palette.bg};border-left:3px solid ${palette.border};color:${palette.color};`
+         + 'padding:6px 12px;border-radius:0 6px 6px 0;margin-bottom:6px;'
+         + 'display:flex;gap:10px;align-items:flex-start',
+  }, [
+    el('div', { style: 'font-size:13px;line-height:1.4' }, [palette.icon]),
+    el('div', { style: 'flex:1;min-width:0' }, parts),
+  ]);
 }
 
 function renderIssue(severity: 'high' | 'medium' | 'low', category: string, detail: string): HTMLElement {

@@ -8,9 +8,10 @@
 //
 // 入力サイズが大きいとコスト・遅延が膨らむため、quotedHistory は 4KB 程度に切詰める。
 
-import { ParsedMail, AICheckResult, Settings, DeterministicHit, activeModel, supportsTemperature } from '../types';
+import { ParsedMail, AICheckResult, Settings, DeterministicHit, RecipientInfo, activeModel, supportsTemperature } from '../types';
 import { DEFAULT_SYSTEM_PROMPT } from '../prompts';
 import { chatCompletion, ChatRequest } from '../relay/ai-client';
+import { formatRecipientInfo } from '../relay/outlook-client';
 
 // SYSTEM_PROMPT は src/prompts.ts の DEFAULT_SYSTEM_PROMPT を組込デフォルトとして使い、
 // settings.systemPrompt が非空ならそちらで上書き (= 設定画面でカスタマイズ可能)。
@@ -19,8 +20,10 @@ export async function runAICheck(
   mail: ParsedMail,
   detHits: DeterministicHit[],
   settings: Settings,
+  recipientInfo: RecipientInfo[] = [],
+  similarCandidates: RecipientInfo[] = [],
 ): Promise<AICheckResult> {
-  const userPrompt = buildUserPrompt(mail, detHits);
+  const userPrompt = buildUserPrompt(mail, detHits, recipientInfo, similarCandidates);
   // ★ system プロンプトは settings.systemPrompt が空文字なら組込デフォルトに fallback。
   //   設定画面の textarea で利用者が自由にカスタマイズできる。
   const systemPrompt = (settings.systemPrompt ?? '').trim() || DEFAULT_SYSTEM_PROMPT;
@@ -45,7 +48,12 @@ export async function runAICheck(
 // 最新返信文を優先して使い、残った文字数で引用履歴を埋める。
 const BODY_AI_MAX = 5000;
 
-function buildUserPrompt(mail: ParsedMail, detHits: DeterministicHit[]): string {
+function buildUserPrompt(
+  mail: ParsedMail,
+  detHits: DeterministicHit[],
+  recipientInfo: RecipientInfo[],
+  similarCandidates: RecipientInfo[],
+): string {
   const trunc = (s: string, max: number) => s.length > max ? s.slice(0, max) + '\n…(以下省略)' : s;
   const fmtAddr = (a: { name: string; email: string }) => a.name ? `${a.name} <${a.email}>` : a.email;
 
@@ -80,6 +88,19 @@ function buildUserPrompt(mail: ParsedMail, detHits: DeterministicHit[]): string 
     '【添付ファイル名】',
     mail.attachments.length === 0 ? '(なし)' : mail.attachments.join(', '),
     '',
+    // ★ Outlook GAL から取得した宛先の組織情報 (= 同姓 別部署 検出に使う)
+    '【宛先の組織情報 (Outlook GAL より)】',
+    recipientInfo.length === 0
+      ? '(取得なし — Outlook 未起動 or 全員外部)'
+      : recipientInfo.map(r => '  - ' + formatRecipientInfo(r)).join('\n'),
+    '',
+    // 同姓 別人候補 (= 「○○様」 を抜いて GAL を検索した結果)
+    similarCandidates.length === 0
+      ? ''
+      : '【同姓別人候補 (= GAL 内の同名・別メアド)】\n'
+        + similarCandidates.map(r => '  - ' + formatRecipientInfo(r)).join('\n')
+        + '\n  ★ 本文宛名と To のメアドが上記候補の中で正しい人物を指しているか'
+        + '本文の話題・部署と整合するか厳密に確認してください。\n',
     '【決定論ルールによる事前検出】',
     detSummary,
     '',

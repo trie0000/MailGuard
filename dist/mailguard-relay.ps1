@@ -394,6 +394,137 @@ function ConvertFrom-AnthropicResponse {
     }
 }
 
+# ── Outlook COM (= GAL 連携 / 同姓同名検出) ──────────────────────────────
+#   ブラウザの誤送信チェック時に、各 To/Cc メアドを Outlook の GAL に問い合せて
+#   組織情報 (部署 / 役職 / 上長 等) を返す。これにより:
+#     - 同姓 別部署 への誤送信を検出可能 (= 既存ルールでは無理だった領域)
+#     - AI に組織コンテキストを渡せる → 「営業案件のメールを HR の人に送ろうとしてる」
+#       のような検出ができる
+#
+#   実装ポイント:
+#     - 既存 Outlook プロセスがあれば接続、無ければ起動 (= 初回遅い)
+#     - process-lifetime のメモリキャッシュで連発時の COM 往復を削減
+#     - Resolve に失敗 = GAL 内に存在しない → 外部メアド扱い
+
+# プロセス内キャッシュ (key = email lowercased)
+$script:OutlookResolveCache = @{}
+
+# 1 つの Outlook MAPI Namespace を再利用 (= 毎回作ると遅い)
+$script:OutlookNs = $null
+function Get-OutlookNamespace {
+    if ($script:OutlookNs) { return $script:OutlookNs }
+    try {
+        $app = $null
+        try { $app = [Runtime.InteropServices.Marshal]::GetActiveObject('Outlook.Application') } catch { }
+        if (-not $app) { $app = New-Object -ComObject Outlook.Application }
+        $script:OutlookNs = $app.GetNamespace('MAPI')
+        return $script:OutlookNs
+    } catch {
+        Write-Host "[outlook] connect failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        return $null
+    }
+}
+
+function Resolve-OutlookRecipient {
+    param([string]$Email)
+    if (-not $Email) { return $null }
+    $key = $Email.ToLower().Trim()
+    if ($script:OutlookResolveCache.ContainsKey($key)) {
+        return $script:OutlookResolveCache[$key]
+    }
+    $ns = Get-OutlookNamespace
+    if (-not $ns) {
+        return @{ email = $Email; resolved = $false; error = 'outlook-not-available' }
+    }
+    try {
+        $rec = $ns.CreateRecipient($Email)
+        $rec.Resolve() | Out-Null
+        if (-not $rec.Resolved) {
+            $info = @{ email = $Email; resolved = $false; type = 'unresolved' }
+            $script:OutlookResolveCache[$key] = $info
+            return $info
+        }
+        $ae = $rec.AddressEntry
+        $info = [ordered]@{
+            email       = $Email
+            resolved    = $true
+            displayName = $rec.Name
+        }
+        # Exchange ユーザなら部署情報取得
+        $exchangeUser = $null
+        try { $exchangeUser = $ae.GetExchangeUser() } catch { }
+        if ($exchangeUser) {
+            $info.type            = 'exchange-user'
+            $info.department      = $exchangeUser.Department
+            $info.jobTitle        = $exchangeUser.JobTitle
+            $info.officeLocation  = $exchangeUser.OfficeLocation
+            $info.companyName     = $exchangeUser.CompanyName
+            $info.alias           = $exchangeUser.Alias
+            $info.primarySmtp     = $exchangeUser.PrimarySmtpAddress
+            $info.firstName       = $exchangeUser.FirstName
+            $info.lastName        = $exchangeUser.LastName
+            try {
+                $mgr = $exchangeUser.GetExchangeUserManager()
+                if ($mgr) { $info.manager = $mgr.Name }
+            } catch { }
+        } else {
+            # 配布リスト? 外部?
+            $info.type = if ($ae.AddressEntryUserType -eq 16) { 'exchange-dl' } else { 'external' }
+        }
+        $script:OutlookResolveCache[$key] = $info
+        return $info
+    } catch {
+        $err = @{ email = $Email; resolved = $false; error = $_.Exception.Message }
+        $script:OutlookResolveCache[$key] = $err
+        return $err
+    }
+}
+
+function Search-OutlookByName {
+    param([string]$NamePart, [int]$Max = 10)
+    if (-not $NamePart) { return @() }
+    $ns = Get-OutlookNamespace
+    if (-not $ns) { return @() }
+    try {
+        $gal = $ns.GetGlobalAddressList()
+        $entries = $gal.AddressEntries
+        $total = $entries.Count
+        $results = @()
+        # 件数が大きいと走査が重いので 上限あり (= 既定 5000 件 scan)
+        $scanLimit = [Math]::Min($total, 5000)
+        $pattern = "*$NamePart*"
+        # GAL は 1-based index
+        $entry = $entries.GetFirst()
+        $i = 0
+        while ($entry -and $i -lt $scanLimit -and $results.Count -lt $Max) {
+            try {
+                if ($entry.Name -like $pattern) {
+                    $eu = $null
+                    try { $eu = $entry.GetExchangeUser() } catch { }
+                    if ($eu) {
+                        $results += [ordered]@{
+                            email          = $eu.PrimarySmtpAddress
+                            resolved       = $true
+                            displayName    = $eu.Name
+                            department     = $eu.Department
+                            jobTitle       = $eu.JobTitle
+                            officeLocation = $eu.OfficeLocation
+                            alias          = $eu.Alias
+                            type           = 'exchange-user'
+                        }
+                    }
+                }
+            } catch { }
+            $entry = $entries.GetNext()
+            $i++
+        }
+        return ,@($results)
+    } catch {
+        Write-Host "[outlook] gal search failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        return @()
+    }
+}
+
 # ── ハンドラ ───────────────────────────────────────────────────────────
 function Handle-Chat {
     param(
@@ -516,6 +647,52 @@ function Handle-Request {
             internalKeywords  = @($keywords)
         }
         Send-Json -Response $res -StatusCode 200 -Body ($defaults | ConvertTo-Json -Depth 10 -Compress)
+        return
+    }
+
+    # /outlook/resolve?email=...  — 単発でメアドを GAL に問い合せ
+    if ($pathLower -eq '/outlook/resolve' -and $req.HttpMethod -eq 'GET') {
+        $email = $req.QueryString['email']
+        if (-not $email) {
+            Send-Json -Response $res -StatusCode 400 -Body '{"error":{"message":"email query required"}}'
+            return
+        }
+        $info = Resolve-OutlookRecipient -Email $email
+        Send-Json -Response $res -StatusCode 200 -Body ($info | ConvertTo-Json -Depth 10 -Compress)
+        return
+    }
+
+    # /outlook/batch-resolve  — メアド配列を一括 resolve (= AI チェック直前用)
+    if ($pathLower -eq '/outlook/batch-resolve' -and $req.HttpMethod -eq 'POST') {
+        $body = Read-RequestBody -Request $req
+        try {
+            $payload = $body | ConvertFrom-Json
+            $emails = @($payload.emails)
+            $results = @()
+            foreach ($e in $emails) {
+                if ($e) {
+                    $info = Resolve-OutlookRecipient -Email ([string]$e)
+                    $results += $info
+                }
+            }
+            Send-Json -Response $res -StatusCode 200 -Body (@{ results = @($results) } | ConvertTo-Json -Depth 10 -Compress)
+        } catch {
+            Send-Json -Response $res -StatusCode 400 -Body ('{"error":{"message":"invalid request: ' + ($_.Exception.Message -replace '"',"'") + '"}}')
+        }
+        return
+    }
+
+    # /outlook/search-similar?name=...  — GAL で同名 (= 苗字部分一致) ユーザを検索
+    if ($pathLower -eq '/outlook/search-similar' -and $req.HttpMethod -eq 'GET') {
+        $name = $req.QueryString['name']
+        if (-not $name) {
+            Send-Json -Response $res -StatusCode 400 -Body '{"error":{"message":"name query required"}}'
+            return
+        }
+        $maxStr = $req.QueryString['max']
+        $maxN = if ($maxStr) { try { [int]$maxStr } catch { 10 } } else { 10 }
+        $results = Search-OutlookByName -NamePart $name -Max $maxN
+        Send-Json -Response $res -StatusCode 200 -Body (@{ results = @($results) } | ConvertTo-Json -Depth 10 -Compress)
         return
     }
 

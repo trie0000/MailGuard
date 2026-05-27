@@ -43,6 +43,29 @@ export interface AICheckResult {
 export interface CombinedResult {
   deterministic: DeterministicHit[];
   ai: AICheckResult | { error: string };
+  /** Outlook GAL から解決した宛先情報 (= 各 To/Cc の部署・役職 等) */
+  recipientInfo?: RecipientInfo[];
+  /** 同姓 別人候補 (= GAL の lastName / displayName 部分一致) */
+  similarNameCandidates?: RecipientInfo[];
+}
+
+// ── Outlook GAL 解決結果 ─────────────────────────────────────────────
+export interface RecipientInfo {
+  email: string;
+  resolved: boolean;
+  displayName?: string;
+  department?: string;
+  jobTitle?: string;
+  officeLocation?: string;
+  companyName?: string;
+  alias?: string;
+  primarySmtp?: string;
+  firstName?: string;
+  lastName?: string;
+  manager?: string;
+  /** 'exchange-user' = GAL 内 / 'exchange-dl' = 配布リスト / 'external' = 外部 / 'unresolved' = 解決失敗 */
+  type?: 'exchange-user' | 'exchange-dl' | 'external' | 'unresolved';
+  error?: string;
 }
 
 // ─── AI モデル候補 (Spira と完全一致) ────────────────────────────────
