@@ -118,12 +118,18 @@ export async function searchSimilarName(
   } catch { return []; }
 }
 
+/** ML / DL 系の RecipientInfo か判定 (= メンバー展開を持つもの) */
+export function isDistributionList(r: RecipientInfo): boolean {
+  return r.type === 'exchange-dl' || r.type === 'personal-dl' || r.type === 'ml-csv';
+}
+
 /** RecipientInfo から AI プロンプト用の 1 行サマリを作る。
- *  ML (= exchange-dl) の場合はメンバーリストも展開して返す。 */
+ *  ML (= exchange-dl / ml-csv) の場合はメンバーリストも展開して返す。 */
 export function formatRecipientInfo(r: RecipientInfo): string {
   if (!r.resolved) return `${r.email} (= GAL 未解決 / 外部メアド)`;
-  if (r.type === 'exchange-dl' || r.type === 'personal-dl') {
-    const header = `${r.email} [ML / 配布リスト: ${r.displayName ?? '(no name)'}, メンバー ${r.memberCount ?? 0} 名]`;
+  if (isDistributionList(r)) {
+    const srcLabel = r.source === 'csv' ? 'CSV 提供 ML' : 'ML / 配布リスト';
+    const header = `${r.email} [${srcLabel}: ${r.displayName ?? '(no name)'}, メンバー ${r.memberCount ?? 0} 名]`;
     if (!r.members || r.members.length === 0) return header;
     const memberLines = r.members.slice(0, 30).map(m => {
       const meta: string[] = [];
@@ -148,7 +154,7 @@ export function formatRecipientInfo(r: RecipientInfo): string {
 
 /** ML メンバー全員の displayName を平坦化して返す (= 「○○様」 照合用) */
 export function flattenMemberNames(r: RecipientInfo): string[] {
-  if (r.type !== 'exchange-dl' && r.type !== 'personal-dl') return [];
+  if (!isDistributionList(r)) return [];
   if (!r.members) return [];
   const names: string[] = [];
   for (const m of r.members) {

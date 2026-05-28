@@ -65,13 +65,16 @@ export interface RecipientInfo {
   firstName?: string;
   lastName?: string;
   manager?: string;
-  /** 'exchange-user' = GAL 内 / 'exchange-dl' = ML / 'personal-dl' = 個人連絡先グループ
-   *  / 'external' = 外部 / 'unresolved' = 解決失敗 */
-  type?: 'exchange-user' | 'exchange-dl' | 'personal-dl' | 'external' | 'unresolved' | 'personal-contact';
-  /** ML / DL のメンバー (= type='exchange-dl' / 'personal-dl' 時に設定) */
+  /** 'exchange-user' = GAL 内個人 / 'exchange-dl' = Exchange ML
+   *  / 'personal-dl' = Outlook 個人連絡先グループ / 'ml-csv' = CSV ファイル提供の ML
+   *  / 'external' = 外部 / 'unresolved' = 解決失敗 / 'personal-contact' = 個人 DL のメンバ */
+  type?: 'exchange-user' | 'exchange-dl' | 'personal-dl' | 'ml-csv' | 'external' | 'unresolved' | 'personal-contact';
+  /** ML / DL のメンバー (= type='exchange-dl' / 'personal-dl' / 'ml-csv' 時に設定) */
   members?: RecipientInfo[];
   /** メンバー総数 (= members は最大 50 件まで返るが、本来の件数) */
   memberCount?: number;
+  /** 解決元 ('gal' = Outlook GAL / 'csv' = ML CSV ファイル) */
+  source?: 'gal' | 'csv';
   error?: string;
 }
 

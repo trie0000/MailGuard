@@ -4,7 +4,7 @@
 // 偽陽性ゼロを目指す (= 「絶対これは問題」というケースだけ flag)。
 
 import { ParsedMail, DeterministicHit, Settings, RecipientInfo } from '../types';
-import { flattenMemberNames } from '../relay/outlook-client';
+import { flattenMemberNames, isDistributionList } from '../relay/outlook-client';
 
 export function runDeterministicChecks(
   mail: ParsedMail,
@@ -102,9 +102,9 @@ function checkSalutationVsTo(mail: ParsedMail, recipientInfo: RecipientInfo[]): 
     if (t.name) targetNames.push(t.name);
     const local = t.email.split('@')[0];
     if (local) targetEmailLocals.push(local);
-    // GAL から ML 情報があれば、メンバー名も照合候補に追加
+    // GAL / CSV から ML 情報があれば、メンバー名も照合候補に追加
     const info = recipientInfo.find(r => r.email.toLowerCase() === t.email.toLowerCase());
-    if (info && (info.type === 'exchange-dl' || info.type === 'personal-dl')) {
+    if (info && isDistributionList(info)) {
       const memberNames = flattenMemberNames(info);
       targetNames.push(...memberNames);
       if (memberNames.length > 0) hasMlExpansion = true;

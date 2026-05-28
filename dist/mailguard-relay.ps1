@@ -394,6 +394,141 @@ function ConvertFrom-AnthropicResponse {
     }
 }
 
+# ── ML メンバー CSV 読込み (= 外部 ML / 別管理 ML 用) ────────────────────
+#   Outlook GAL に登録されてない ML (= 例: 顧客側 ML / 別組織 ML / ファイル管理の MLG)
+#   のメンバー情報を CSV から読み込む。CSV は MAILGUARD_ML_CSV_FOLDER の
+#   フォルダに *.csv で配置。
+#
+#   CSV 形式 (= 1 行目 ヘッダ):
+#     メーリングリストアドレス / メンバ(...)/ メールアドレス / 氏名 / 役職 / 組織名 ...
+#   列名は部分一致で検出するので順序は不問。
+#
+#   エンコーディング:
+#     UTF-8 (BOM あり/なし) / Shift-JIS (Windows 既定) を自動判別。
+#
+#   キャッシュ:
+#     起動時に全 CSV をスキャンしてインデックス化。リクエスト毎に最大更新時刻を
+#     確認し、変更あれば再ビルド (= ファイル差し替えで自動反映)。
+
+$script:MlCsvIndex = @{}                     # { mlAddressLower => [members] }
+$script:MlCsvIndexBuildTime = [DateTime]::MinValue
+$script:MlCsvFolderResolved = $null
+
+function Resolve-MlCsvFolder {
+    if ($script:MlCsvFolderResolved) { return $script:MlCsvFolderResolved }
+    $envVal = Get-EnvAny @('MAILGUARD_ML_CSV_FOLDER')
+    if (-not $envVal) { $envVal = 'ml' }   # 既定: <repo>/ml or <script>/../ml
+    if (-not [System.IO.Path]::IsPathRooted($envVal)) {
+        # script dir からの相対 (= relay/ の隣 or 親) で探す
+        $candidate1 = Join-Path $scriptDir $envVal
+        $candidate2 = Join-Path $repoRoot $envVal
+        $candidate3 = Join-Path (Get-Location).Path $envVal
+        foreach ($p in @($candidate1, $candidate2, $candidate3)) {
+            if (Test-Path -LiteralPath $p -PathType Container) {
+                $envVal = $p; break
+            }
+        }
+    }
+    $script:MlCsvFolderResolved = $envVal
+    return $envVal
+}
+
+function Read-CsvAutoEncoding {
+    param([string]$Path)
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+        # UTF-8 BOM 検知
+        $hasBom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+        if ($hasBom) {
+            return Import-Csv -LiteralPath $Path -Encoding UTF8
+        }
+        # UTF-8 として読んで replacement char (U+FFFD) が出るなら SJIS と判定
+        $utf8 = [System.Text.Encoding]::UTF8.GetString($bytes)
+        if ($utf8.IndexOf([char]0xFFFD) -ge 0) {
+            return Import-Csv -LiteralPath $Path -Encoding Default
+        }
+        return Import-Csv -LiteralPath $Path -Encoding UTF8
+    } catch {
+        Write-Host "[ml-csv] read failed: $Path — $($_.Exception.Message)" -ForegroundColor Yellow
+        return @()
+    }
+}
+
+function Build-MlCsvIndex {
+    param([switch]$Force)
+    $folder = Resolve-MlCsvFolder
+    if (-not (Test-Path -LiteralPath $folder -PathType Container)) {
+        if (-not $script:MlCsvIndexBuildTime -or $script:MlCsvIndexBuildTime -eq [DateTime]::MinValue) {
+            Write-Host "[ml-csv] folder not found: $folder (skipping)"
+        }
+        $script:MlCsvIndex = @{}
+        $script:MlCsvIndexBuildTime = [DateTime]::Now
+        return
+    }
+    $files = @(Get-ChildItem -LiteralPath $folder -Filter *.csv -File -ErrorAction SilentlyContinue)
+    if ($files.Count -eq 0) {
+        $script:MlCsvIndex = @{}
+        $script:MlCsvIndexBuildTime = [DateTime]::Now
+        return
+    }
+
+    # 自動更新検知: 全 CSV の最終更新時刻が前回ビルド時刻以下なら skip
+    if (-not $Force.IsPresent) {
+        $maxMtime = ($files | Measure-Object -Property LastWriteTime -Maximum).Maximum
+        if ($maxMtime -and $maxMtime -le $script:MlCsvIndexBuildTime) { return }
+    }
+
+    Write-Host "[ml-csv] scanning $folder ($($files.Count) files)"
+    $index = @{}
+    foreach ($file in $files) {
+        try {
+            $rows = Read-CsvAutoEncoding -Path $file.FullName
+            $rowCount = 0
+            foreach ($row in $rows) {
+                $mlAddr = ''; $memberEmail = ''; $memberName = ''; $org = ''; $jobTitle = ''
+                foreach ($prop in $row.PSObject.Properties) {
+                    $n = $prop.Name
+                    $v = if ($prop.Value) { [string]$prop.Value } else { '' }
+                    if     ($n -like '*メーリングリスト*ドレス*' -or $n -like '*ML*ドレス*' -or $n -like '*MLG*ドレス*' -or $n -like '*ml*ddress*') { $mlAddr = $v }
+                    elseif ($n -like '*メールアドレス*' -or $n -like '*メアド*' -or $n -like '*mail*ddress*' -or $n -like '*e-mail*') { $memberEmail = $v }
+                    elseif ($n -like '*氏名*' -or $n -like '*名前*' -or $n -like '*name*') { $memberName = $v }
+                    elseif ($n -like '*組織*' -or $n -like '*部署*' -or $n -like '*所属*' -or $n -like '*部門*' -or $n -like '*department*') { $org = $v }
+                    elseif ($n -like '*役職*' -or $n -like '*職位*' -or $n -like '*肩書*' -or $n -like '*title*') { $jobTitle = $v }
+                }
+                if ($mlAddr -and $memberEmail) {
+                    $key = $mlAddr.ToLower().Trim()
+                    if (-not $index.ContainsKey($key)) { $index[$key] = @() }
+                    $index[$key] += [ordered]@{
+                        email       = $memberEmail.Trim()
+                        displayName = $memberName.Trim()
+                        department  = $org.Trim()
+                        jobTitle    = $jobTitle.Trim()
+                        type        = 'exchange-user'
+                    }
+                    $rowCount++
+                }
+            }
+            Write-Host "[ml-csv]   loaded $($file.Name) ($rowCount rows)"
+        } catch {
+            Write-Host "[ml-csv] parse failed: $($file.FullName) — $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+    Write-Host "[ml-csv] index built: $($index.Keys.Count) ML addresses"
+    $script:MlCsvIndex = $index
+    $script:MlCsvIndexBuildTime = [DateTime]::Now
+}
+
+function Get-MlMembersFromCsv {
+    param([string]$Address)
+    if (-not $Address) { return @() }
+    Build-MlCsvIndex   # idempotent + 自動更新検知
+    $key = $Address.ToLower().Trim()
+    if ($script:MlCsvIndex.ContainsKey($key)) {
+        return @($script:MlCsvIndex[$key])
+    }
+    return @()
+}
+
 # ── Outlook COM (= GAL 連携 / 同姓同名検出) ──────────────────────────────
 #   ブラウザの誤送信チェック時に、各 To/Cc メアドを Outlook の GAL に問い合せて
 #   組織情報 (部署 / 役職 / 上長 等) を返す。これにより:
@@ -432,6 +567,25 @@ function Resolve-OutlookRecipient {
     if ($script:OutlookResolveCache.ContainsKey($key)) {
         return $script:OutlookResolveCache[$key]
     }
+
+    # ── CSV ML lookup を最優先 (= Outlook GAL に無い外部 ML 等用) ──────
+    #   CSV にこのアドレスが ML として登録されてれば、CSV を真実として返す。
+    #   GAL より CSV を優先する理由: CSV は admin が手動管理した authoritative データ。
+    $csvMembers = @(Get-MlMembersFromCsv -Address $Email)
+    if ($csvMembers.Count -gt 0) {
+        $info = [ordered]@{
+            email       = $Email
+            resolved    = $true
+            displayName = $Email
+            type        = 'ml-csv'
+            source      = 'csv'
+            members     = @($csvMembers)
+            memberCount = $csvMembers.Count
+        }
+        $script:OutlookResolveCache[$key] = $info
+        return $info
+    }
+
     $ns = Get-OutlookNamespace
     if (-not $ns) {
         return @{ email = $Email; resolved = $false; error = 'outlook-not-available' }
@@ -724,6 +878,19 @@ function Handle-Request {
             internalKeywords  = @($keywords)
         }
         Send-Json -Response $res -StatusCode 200 -Body ($defaults | ConvertTo-Json -Depth 10 -Compress)
+        return
+    }
+
+    # /ml/reload  — CSV ML インデックスを強制再ビルド (= CSV ファイル更新後の即時反映用)
+    if ($pathLower -eq '/ml/reload') {
+        Build-MlCsvIndex -Force
+        $resp = [ordered]@{
+            ok = $true
+            folder = $script:MlCsvFolderResolved
+            mlCount = $script:MlCsvIndex.Keys.Count
+            buildTime = $script:MlCsvIndexBuildTime.ToString('o')
+        }
+        Send-Json -Response $res -StatusCode 200 -Body ($resp | ConvertTo-Json -Depth 10 -Compress)
         return
     }
 
