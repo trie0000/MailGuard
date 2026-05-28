@@ -21,7 +21,14 @@ export function renderResult(result: CombinedResult): HTMLElement {
   return el('div', {
     style: 'background:#fff;border-radius:10px;padding:20px;border:1px solid #e8e4d8',
   }, [
-    renderOverallBanner(overall, aiResult?.confidence ?? null, aiResult?.summary ?? null),
+    renderOverallBanner(
+      overall,
+      aiResult?.confidence ?? null,
+      aiResult?.summary ?? null,
+      result.deterministic,
+      aiOk,
+      aiError,
+    ),
 
     // 決定論ルール ヒット
     el('div', { style: 'margin-top:18px' }, [
@@ -108,7 +115,14 @@ function sectionHeader(label: string, badge: string): HTMLElement {
   ]);
 }
 
-function renderOverallBanner(level: string, confidence: number | null, summary: string | null): HTMLElement {
+function renderOverallBanner(
+  level: string,
+  confidence: number | null,
+  aiSummary: string | null,
+  detHits: DeterministicHit[],
+  aiOk: boolean,
+  aiError: string | null,
+): HTMLElement {
   const palette: Record<string, { bg: string; border: string; color: string; icon: string; label: string }> = {
     high: { bg: '#fef2f2', border: '#dc2626', color: '#991b1b', icon: '🚨', label: '高リスク — 送信前に必ず確認' },
     medium: { bg: '#fef3c7', border: '#f59e0b', color: '#92400e', icon: '⚠', label: '中リスク — 一度確認をおすすめ' },
@@ -116,19 +130,44 @@ function renderOverallBanner(level: string, confidence: number | null, summary: 
     ok: { bg: '#ecfdf5', border: '#10b981', color: '#065f46', icon: '✅', label: '問題なし — 送信して OK' },
   };
   const p = palette[level] ?? palette.ok!;
+
+  // ── ルールベース 集計 (= severity 別の件数 + カテゴリ一覧) ─────────────
+  const detBySev = { high: 0, medium: 0, low: 0 };
+  const detCategories: string[] = [];
+  for (const h of detHits) {
+    detBySev[h.severity]++;
+    if (!detCategories.includes(h.category)) detCategories.push(h.category);
+  }
+  const detSummary = detHits.length === 0
+    ? '🔧 ルールベース: 検出なし (= 機械判定で異常なし)'
+    : `🔧 ルールベース: ${detHits.length} 件 検出`
+      + ` (${[
+          detBySev.high   ? `🔴 高 ${detBySev.high}` : '',
+          detBySev.medium ? `🟡 中 ${detBySev.medium}` : '',
+          detBySev.low    ? `🔵 低 ${detBySev.low}` : '',
+        ].filter(Boolean).join(' / ')})`
+      + ` — ${detCategories.join(', ')}`;
+
+  // ── AI サマリ ──────────────────────────────────────────────────────
+  const aiLine = !aiOk
+    ? `🤖 AI: 解析失敗 (${(aiError ?? '').slice(0, 80)}…)`
+    : aiSummary
+      ? `🤖 AI: ${aiSummary}`
+      : '🤖 AI: 解析完了 — 個別指摘なし';
+
   return el('div', {
     style: `background:${p.bg};border-left:6px solid ${p.border};color:${p.color};`
          + 'padding:16px 20px;border-radius:8px;display:flex;gap:14px;align-items:flex-start',
   }, [
     el('div', { style: 'font-size:30px;line-height:1' }, [p.icon]),
     el('div', { style: 'flex:1;min-width:0' }, [
-      el('div', { style: 'font-size:16px;font-weight:700;margin-bottom:4px' }, [p.label]),
+      el('div', { style: 'font-size:16px;font-weight:700;margin-bottom:6px' }, [p.label]),
       ...(confidence !== null ? [
-        el('div', { style: 'font-size:12px;opacity:0.85' }, [`AI 信頼度: ${Math.round(confidence * 100)}%`]),
+        el('div', { style: 'font-size:12px;opacity:0.85;margin-bottom:6px' }, [`AI 信頼度: ${Math.round(confidence * 100)}%`]),
       ] : []),
-      ...(summary ? [
-        el('div', { style: 'font-size:13px;margin-top:6px;line-height:1.7' }, [summary]),
-      ] : []),
+      // ★ ルールベース と AI の 2 行サマリ (= 必ず両方表示)
+      el('div', { style: 'font-size:13px;line-height:1.7;margin-top:4px' }, [detSummary]),
+      el('div', { style: 'font-size:13px;line-height:1.7' }, [aiLine]),
     ]),
   ]);
 }
