@@ -13,8 +13,10 @@
 
 import { RecipientInfo, Settings } from '../types';
 
-const CACHE_KEY = 'mailguard.outlook.resolve.v1';
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000;   // 1 日
+// v2: ml-csv type 追加 / external キャッシュを短く (CSV を後から置いたケース対応)
+const CACHE_KEY = 'mailguard.outlook.resolve.v2';
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000;   // 1 日 (resolved な GAL ユーザ)
+const CACHE_TTL_UNRESOLVED_MS = 5 * 60 * 1000;   // 5 分 (external / unresolved → CSV 追加で即反映できるよう短く)
 
 interface CacheEntry {
   info: RecipientInfo;
@@ -37,8 +39,16 @@ function getCached(email: string): RecipientInfo | null {
   const cache = loadCache();
   const entry = cache[email.toLowerCase().trim()];
   if (!entry) return null;
-  if (Date.now() - entry.ts > CACHE_TTL_MS) return null;
+  // external / unresolved は CSV を後から追加するケースを考慮して短い TTL
+  const isStale = entry.info.type === 'external' || entry.info.type === 'unresolved' || !entry.info.resolved;
+  const ttl = isStale ? CACHE_TTL_UNRESOLVED_MS : CACHE_TTL_MS;
+  if (Date.now() - entry.ts > ttl) return null;
   return entry.info;
+}
+
+/** Outlook GAL / CSV ML キャッシュを全クリア (= 設定画面から呼出し) */
+export function clearOutlookCache(): void {
+  try { localStorage.removeItem(CACHE_KEY); } catch { /* ignore */ }
 }
 
 function setCached(email: string, info: RecipientInfo): void {

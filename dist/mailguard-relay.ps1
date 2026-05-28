@@ -456,10 +456,11 @@ function Read-CsvAutoEncoding {
 
 function Build-MlCsvIndex {
     param([switch]$Force)
+    $isFirstBuild = ($script:MlCsvIndexBuildTime -eq [DateTime]::MinValue)
     $folder = Resolve-MlCsvFolder
     if (-not (Test-Path -LiteralPath $folder -PathType Container)) {
-        if (-not $script:MlCsvIndexBuildTime -or $script:MlCsvIndexBuildTime -eq [DateTime]::MinValue) {
-            Write-Host "[ml-csv] folder not found: $folder (skipping)"
+        if ($isFirstBuild -or $Force.IsPresent) {
+            Write-Host "[ml-csv] folder not found: $folder (= CSV ML 検索無効。MAILGUARD_ML_CSV_FOLDER で指定 or 'ml' フォルダを作成)"
         }
         $script:MlCsvIndex = @{}
         $script:MlCsvIndexBuildTime = [DateTime]::Now
@@ -467,6 +468,9 @@ function Build-MlCsvIndex {
     }
     $files = @(Get-ChildItem -LiteralPath $folder -Filter *.csv -File -ErrorAction SilentlyContinue)
     if ($files.Count -eq 0) {
+        if ($isFirstBuild -or $Force.IsPresent) {
+            Write-Host "[ml-csv] folder is empty: $folder (= *.csv を配置すると ML メンバー検索が有効になります)"
+        }
         $script:MlCsvIndex = @{}
         $script:MlCsvIndexBuildTime = [DateTime]::Now
         return
@@ -564,16 +568,15 @@ function Resolve-OutlookRecipient {
     param([string]$Email)
     if (-not $Email) { return $null }
     $key = $Email.ToLower().Trim()
-    if ($script:OutlookResolveCache.ContainsKey($key)) {
-        return $script:OutlookResolveCache[$key]
-    }
 
-    # ── CSV ML lookup を最優先 (= Outlook GAL に無い外部 ML 等用) ──────
-    #   CSV にこのアドレスが ML として登録されてれば、CSV を真実として返す。
-    #   GAL より CSV を優先する理由: CSV は admin が手動管理した authoritative データ。
+    # ── CSV ML lookup を最優先 (= キャッシュより 前)に確認 ────────────────
+    #   理由: $script:OutlookResolveCache に「過去 GAL で external と判定した」
+    #         結果が残ってると、後から CSV を置いても古い結果が返り続ける罠を回避。
+    #   CSV index 自体が高速 hashtable lookup なので キャッシュなしで毎回見て OK。
     $csvMembers = @(Get-MlMembersFromCsv -Address $Email)
     if ($csvMembers.Count -gt 0) {
-        $info = [ordered]@{
+        Write-Host "[outlook-resolve] $Email → CSV ML hit (members=$($csvMembers.Count))"
+        return [ordered]@{
             email       = $Email
             resolved    = $true
             displayName = $Email
@@ -582,8 +585,11 @@ function Resolve-OutlookRecipient {
             members     = @($csvMembers)
             memberCount = $csvMembers.Count
         }
-        $script:OutlookResolveCache[$key] = $info
-        return $info
+    }
+
+    # ── GAL キャッシュ ──────────────────────────────────────────────────
+    if ($script:OutlookResolveCache.ContainsKey($key)) {
+        return $script:OutlookResolveCache[$key]
     }
 
     $ns = Get-OutlookNamespace
@@ -912,6 +918,7 @@ function Handle-Request {
         try {
             $payload = $body | ConvertFrom-Json
             $emails = @($payload.emails)
+            Write-Host "[outlook] batch-resolve: $($emails.Count) emails -> $($emails -join ', ')"
             $results = @()
             foreach ($e in $emails) {
                 if ($e) {
@@ -999,6 +1006,18 @@ Write-Host '  -----------------------------------------'
 Write-Host "  Listen  : $prefix"
 Write-Host '  設定方針 : API キー / 上流 URL / プロバイダ は ブラウザ UI から送信'
 Write-Host "  Test    : curl $($prefix)health"
+Write-Host '  -----------------------------------------'
+Write-Host '  ML CSV  : (起動時スキャン)'
+# 起動時に proactive build で CSV フォルダの状態を表示
+Build-MlCsvIndex -Force
+Write-Host "    folder    = $($script:MlCsvFolderResolved)"
+Write-Host "    ML 件数   = $($script:MlCsvIndex.Keys.Count)"
+if ($script:MlCsvIndex.Keys.Count -gt 0) {
+    $totalMembers = 0
+    foreach ($k in $script:MlCsvIndex.Keys) { $totalMembers += $script:MlCsvIndex[$k].Count }
+    Write-Host "    メンバー  = $totalMembers 名"
+    Write-Host "    ML 一覧   = $($script:MlCsvIndex.Keys -join ', ')"
+}
 if ($fallbackApiKey -or $fallbackUpstream -or $fallbackProvider) {
     Write-Host '  -----------------------------------------'
     Write-Host '  env fallback (= UI 未設定時に使用):'

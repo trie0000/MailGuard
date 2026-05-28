@@ -9,6 +9,7 @@ import {
 import { DEFAULT_SYSTEM_PROMPT } from '../prompts';
 import { getSettings, setSettings } from '../settings';
 import { fetchEnvDefaults, normalizeProvider } from '../defaults';
+import { clearOutlookCache } from '../relay/outlook-client';
 
 const LABEL_STYLE =
   'color:#7a766c;font-size:13px;align-self:center;justify-self:end;text-align:right;white-space:nowrap';
@@ -262,6 +263,18 @@ export function openSettingsModal(onClose: (newSettings: Settings) => void): voi
     },
   }, ['env デフォルトに戻す']);
 
+  // Outlook GAL / CSV ML キャッシュ クリア (= CSV を後から置いたが反映されない時の救済)
+  const btnClearCache = el('button', {
+    style: 'padding:9px 14px;background:#fff;color:#7a766c;border:1px dashed #c0bdb0;'
+         + 'border-radius:6px;font-size:12px;cursor:pointer',
+    title: 'ブラウザに保存された Outlook GAL / CSV ML の解決結果キャッシュをクリア (= 次回チェックで relay に再問い合せ)',
+    onclick: () => {
+      clearOutlookCache();
+      envResetStatus.textContent = '✓ GAL / ML キャッシュをクリアしました (= 次の AI チェックで再取得)';
+      envResetStatus.style.color = '#065f46';
+    },
+  }, ['GAL/ML キャッシュ クリア']);
+
   // ── 組み立て ────────────────────────────────────────────────────────
   modal.appendChild(el('h2', { style: 'margin:0 0 4px;font-size:18px;font-weight:700' }, ['⚙ AI 設定']));
   modal.appendChild(el('p', { style: 'margin:0 0 14px;font-size:12px;color:#7a766c;line-height:1.6' }, [
@@ -283,6 +296,7 @@ export function openSettingsModal(onClose: (newSettings: Settings) => void): voi
     style: 'display:flex;gap:10px;align-items:center;margin-top:22px;flex-wrap:wrap',
   }, [
     btnEnvReset,
+    btnClearCache,
     envResetStatus,
     btnCancel,
     btnSave,
