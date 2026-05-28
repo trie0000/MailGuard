@@ -87,12 +87,16 @@ function checkConfidentialKeywords(mail: ParsedMail, settings: Settings): Determ
 //     - To が ML の場合は、ML メンバー (= displayName / lastName / firstName) に
 //       本文の宛名が含まれていれば 問題なし (= 警告しない)
 //     - ML メンバー情報が GAL / CSV から取得できなかった場合は判断保留 (= 警告しない)
+//     - 過去履歴 (= 同じスレッドの引用部) に「同じ To + 同じ宛名」の組合せが
+//       既に出ていれば → low に降格 (= メンバー情報を取得できない ML の偽陽性回避)
 //
 //   例:
 //     OK : To=tanaka@xxx <田中 太郎>, 本文「田中様」
 //     NG : To=tanaka@xxx, 本文「鈴木様」
 //     OK : To=sales-team@xxx (メンバー: 田中/鈴木/山田), 本文「鈴木様」
 //     NG : To=sales-team@xxx (メンバー: 田中/鈴木/山田), 本文「佐藤様」
+//     LOW: To=external-ml@xxx (メンバー不明), 本文「鈴木様」、
+//          かつ 過去履歴に「To=external-ml@xxx, 本文『鈴木様』」が既出
 function checkSalutationVsTo(mail: ParsedMail, recipientInfo: RecipientInfo[]): DeterministicHit[] {
   const salutation = extractSalutation(mail.latestReply);
   if (!salutation) return [];
@@ -143,14 +147,97 @@ function checkSalutationVsTo(mail: ParsedMail, recipientInfo: RecipientInfo[]): 
   //       決めるには情報不足。AI 側で文脈判断に委ねる。
   if (hasMlWithoutMembers && !hasMlExpansion) return [];
 
-  // 不一致 → high
+  // ★ 過去履歴チェック: 同じ To + 同じ宛名 の組合せが過去にあれば low に降格
+  //    (= こちらで メンバーを把握できない ML の誤検出対策)
+  //    例: To=external-ml@xxx, 本文「鈴木様」 で 一致しないが、
+  //        引用部の過去メールが「To=external-ml@xxx, 本文『鈴木様』」だった場合
+  //        → ML 内の正しい宛先名と判明済 → low
   const toLabel = mail.to.map(t => t.name ? `${t.name} <${t.email}>` : t.email).join(', ');
+  const currentToLower = mail.to.map(t => t.email.toLowerCase().trim());
+  const salutationTokensLower = tokens.map(t => t.toLowerCase());
+  const pastSegments = parseQuotedSegments(mail.quotedHistory);
+  const pastHadSamePair = pastSegments.some(seg => {
+    const sharedTo = seg.to.some(e => currentToLower.includes(e));
+    if (!sharedTo || !seg.salutation) return false;
+    const pastTokens = tokenizeSalutation(seg.salutation).map(t => t.toLowerCase());
+    return salutationTokensLower.some(s => pastTokens.includes(s));
+  });
+
+  if (pastHadSamePair) {
+    return [{
+      category: '宛名不一致',
+      severity: 'low',
+      detail: `本文宛名 "${salutation}" と To "${toLabel}" は直接一致しませんが、`
+            + `過去履歴で 同じ To + 同じ宛名 の組合せが既出のため low に降格しました `
+            + `(= ML メンバー情報を取得できないケースの偽陽性回避)。`,
+    }];
+  }
+
+  // 不一致 → high
   const detail = hasMlExpansion
     ? `本文冒頭の宛名 "${salutation}" が To の ML メンバー (${targetNames.length} 名) に存在しません。`
       + ` To=${toLabel}。 別の人宛のメールを ML に投げている可能性があります (= 誤送信 high リスク)。`
     : `本文冒頭の宛名 "${salutation}" と To "${toLabel}" の名前が一致しません。`
       + ` 別人宛の下書きを誤った宛先に送ろうとしている可能性があります (= 誤送信 high リスク)。`;
   return [{ category: '宛名不一致', severity: 'high', detail }];
+}
+
+// ── 過去履歴 (引用部) のセグメント パーサ ─────────────────────────────
+//   引用部を 1 メッセージずつに分割し、各メッセージの To/Cc と本文冒頭の宛名を抽出。
+//   メッセージ境界: "From:" / "差出人:" / "送信者:" ヘッダ行 or
+//                  "-----Original Message-----" / "----- Forwarded message -----"
+interface PastSegment {
+  to: string[];               // 各メッセージの To/Cc/宛先 (= lowercase)
+  salutation: string | null;  // そのメッセージの本文冒頭の宛名
+}
+export function parseQuotedSegments(quotedHistory: string): PastSegment[] {
+  if (!quotedHistory) return [];
+  // 引用記号 "> " を剥がす (= Gmail / メール クライアントの quote 表記)
+  const cleaned = quotedHistory.split('\n').map(l => l.replace(/^[> 　]+/, '')).join('\n');
+
+  // メッセージ境界で分割
+  //   1. "-----Original Message-----" / "----- Forwarded message -----" 等
+  //   2. 行頭の "From:" / "差出人:" / "送信者:" ヘッダ (= 新メッセージ開始の合図)
+  const SEP_RE = /(?:^|\n)(?:[-=]{2,}\s*(?:Original Message|Forwarded message|転送されたメッセージ)[^\n]*[-=]*\s*\n|(?=(?:From|差出人|送信者)\s*[:：]))/i;
+  const parts = cleaned.split(SEP_RE).filter(p => p && p.trim());
+
+  const segments: PastSegment[] = [];
+  const HEADER_LINE = /^(From|To|Cc|Subject|Date|差出人|宛先|送信者|件名|送信日時|Sent)\s*[:：]\s*(.*)$/i;
+  const EMAIL_RE = /[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/g;
+
+  for (const part of parts) {
+    const lines = part.split('\n');
+    const toEmails: string[] = [];
+    let bodyStart = 0;
+    // ヘッダ ブロック (= 連続するヘッダ行) を読み取り、その後を本文とする
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i] ?? '';
+      const m = line.match(HEADER_LINE);
+      if (m) {
+        if (/^(To|Cc|宛先)$/i.test(m[1]!)) {
+          const emails = m[2]!.match(EMAIL_RE) ?? [];
+          for (const e of emails) toEmails.push(e.toLowerCase().trim());
+        }
+        bodyStart = i + 1;
+      } else if (line.trim() === '' && bodyStart > 0) {
+        // ヘッダ ブロックの後の空行 → ここから本文
+        bodyStart = i + 1;
+        break;
+      } else if (bodyStart === 0) {
+        // 最初からヘッダ無し → ファイル全体を本文扱い
+        break;
+      } else {
+        // ヘッダ ブロック途中の非ヘッダ行 → 本文開始
+        break;
+      }
+    }
+    const body = lines.slice(bodyStart).join('\n');
+    const salutation = extractSalutation(body);
+    if (toEmails.length > 0 || salutation) {
+      segments.push({ to: toEmails, salutation });
+    }
+  }
+  return segments;
 }
 
 /** 「○○様」「○○ 株式会社」など本文冒頭の宛名を抽出。
