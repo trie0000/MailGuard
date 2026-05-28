@@ -127,6 +127,10 @@ function checkSalutationVsTo(mail: ParsedMail, recipientInfo: RecipientInfo[]): 
       } else {
         hasMlWithoutMembers = true;
       }
+    } else if (looksLikeMlAddress(t.email)) {
+      // GAL では DL と認識されなかったが、アドレス パターンから ML と推測されるケース
+      // (= 例: "iflex_config_audit_wiz@ml.jp.panasonic.com" は "ml." サブドメインから ML)
+      hasMlWithoutMembers = true;
     }
   }
 
@@ -146,10 +150,11 @@ function checkSalutationVsTo(mail: ParsedMail, recipientInfo: RecipientInfo[]): 
   // ★ 一般名宛 × ML: 本文宛名が「各位 / ご担当者様 / 部長様」等の総称・役職名で、
   //   かつ To が ML / 配布リスト の場合は、個人名で照合しても絶対に一致しないが
   //   ML 全員宛の正当な表現なので、ルールベースでは "low" (= 警告表示までに留める)。
-  //   GAL/CSV でメンバーが見えてる ML / 見えてない ML 両方でこの扱い。
+  //   GAL/CSV でメンバーが見えてる ML / 見えてない ML / アドレスから ML と推測される
+  //   ケース (= "ml." ドメイン や "-team" / "-list" 系 local) の 3 種類すべてで適用。
   const toIsMl = mail.to.some(t => {
     const info = recipientInfo.find(r => r.email.toLowerCase() === t.email.toLowerCase());
-    return info && isDistributionList(info);
+    return (info && isDistributionList(info)) || looksLikeMlAddress(t.email);
   }) || hasMlExpansion || hasMlWithoutMembers;
   if (toIsMl && isGenericSalutation(salutation)) {
     const toLabelMl = mail.to.map(t => t.name ? `${t.name} <${t.email}>` : t.email).join(', ');
@@ -288,6 +293,30 @@ export function extractSalutation(latestReply: string): string | null {
     if (m3) return 'Dear ' + (m3[1] ?? '').trim();
   }
   return null;
+}
+
+/** アドレスのパターンから ML / 配布リスト と推測。
+ *  GAL が DL と認識してくれなかった (= type='external' で返した) ケースの fallback。
+ *  例: "ml.jp.panasonic.com" / "lists.example.com" のサブドメイン、
+ *      "sales-team@" / "all-staff@" / "dev_list@" のような local part。
+ *  個人メアドの誤判定を避けるため、判定条件は保守的に絞る。 */
+export function looksLikeMlAddress(email: string): boolean {
+  if (!email) return false;
+  const e = email.toLowerCase().trim();
+  const at = e.indexOf('@');
+  if (at < 0) return false;
+  const local = e.slice(0, at);
+  const dom = e.slice(at + 1);
+
+  // ① ドメイン: "ml." / "lists." / "groups." を含む (= ほぼ確実に ML 用)
+  if (/(^|\.)(ml|lists?|groups?|dl|distlist|maillists?)\./.test(dom)) return true;
+
+  // ② local part: 区切り記号で囲まれた ML/list/team/group/all/members/staff 等
+  //    "info" や "support" のような一般メアドを 個人と誤判定しないよう、
+  //    list / team / group / members 等の "明らかに集団を指す語" に限定。
+  if (/(^|[-_.])(ml|list|lists|team|teams|group|groups|members|all|everyone|staff)($|[-_.])/.test(local)) return true;
+
+  return false;
 }
 
 /** 本文宛名が「個人名ではなく総称 / 役職名」かを判定。
