@@ -118,9 +118,25 @@ export async function searchSimilarName(
   } catch { return []; }
 }
 
-/** RecipientInfo から AI プロンプト用の 1 行サマリを作る */
+/** RecipientInfo から AI プロンプト用の 1 行サマリを作る。
+ *  ML (= exchange-dl) の場合はメンバーリストも展開して返す。 */
 export function formatRecipientInfo(r: RecipientInfo): string {
   if (!r.resolved) return `${r.email} (= GAL 未解決 / 外部メアド)`;
+  if (r.type === 'exchange-dl' || r.type === 'personal-dl') {
+    const header = `${r.email} [ML / 配布リスト: ${r.displayName ?? '(no name)'}, メンバー ${r.memberCount ?? 0} 名]`;
+    if (!r.members || r.members.length === 0) return header;
+    const memberLines = r.members.slice(0, 30).map(m => {
+      const meta: string[] = [];
+      if (m.displayName) meta.push(m.displayName);
+      if (m.department) meta.push(m.department);
+      if (m.jobTitle) meta.push(m.jobTitle);
+      return `      • ${m.email ?? '(no email)'} (${meta.join(' / ')})`;
+    });
+    const more = (r.memberCount ?? r.members.length) > r.members.length
+      ? `\n      … 他 ${(r.memberCount ?? r.members.length) - r.members.length} 名`
+      : '';
+    return `${header}\n${memberLines.join('\n')}${more}`;
+  }
   const parts: string[] = [];
   if (r.displayName) parts.push(r.displayName);
   if (r.department) parts.push(r.department);
@@ -128,4 +144,17 @@ export function formatRecipientInfo(r: RecipientInfo): string {
   if (r.officeLocation) parts.push(r.officeLocation);
   if (r.manager) parts.push(`上長: ${r.manager}`);
   return `${r.email}: ${parts.join(' / ')}`;
+}
+
+/** ML メンバー全員の displayName を平坦化して返す (= 「○○様」 照合用) */
+export function flattenMemberNames(r: RecipientInfo): string[] {
+  if (r.type !== 'exchange-dl' && r.type !== 'personal-dl') return [];
+  if (!r.members) return [];
+  const names: string[] = [];
+  for (const m of r.members) {
+    if (m.displayName) names.push(m.displayName);
+    if (m.lastName) names.push(m.lastName);
+    if (m.firstName) names.push(m.firstName);
+  }
+  return names;
 }

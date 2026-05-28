@@ -174,12 +174,12 @@ async function runChecks(mail: ParsedMail): Promise<void> {
   ]));
 
   const settings = getSettings();
-  const det = runDeterministicChecks(mail, settings);
 
-  // ── Outlook GAL 連携 ──────────────────────────────────────────────────
-  //   ★ 過去履歴に出てくる参加者も同時に GAL resolve することで、AI に
-  //     「過去は営業部の人と話してたのに今回は人事部に投げてる」のような
-  //     "過去と現在の所属差異" 検出をさせる。
+  // ── Outlook GAL 連携を先に走らせる ────────────────────────────────────
+  //   ★ 順序が重要: 決定論チェック (= 宛名 vs To) が ML メンバー情報を必要とするため、
+  //     GAL 解決を 先 に完了させてから決定論チェックに渡す。
+  //     これで「To=sales-team@xxx, 本文『鈴木様』」のケースで、ML メンバーに
+  //     鈴木さんがいれば 宛名一致と判定できる。
   const currentRecipients = [...mail.to, ...mail.cc].map(r => r.email).filter(Boolean);
   const pastParticipantEmails = extractPastParticipantEmails(mail.quotedHistory, currentRecipients);
   const salutation = extractSalutation(mail.latestReply);
@@ -197,6 +197,9 @@ async function runChecks(mail: ParsedMail): Promise<void> {
   console.log('[mailguard] GAL — current:', recipientInfo,
     '/ past participants:', pastParticipantInfo,
     '/ similar candidates:', similarCandidates);
+
+  // 決定論チェック (= ML メンバー情報を渡せるようになった)
+  const det = runDeterministicChecks(mail, settings, recipientInfo);
 
   // ── AI チェック: 全情報を渡す ──────────────────────────────────────
   let aiResult: CombinedResult['ai'];

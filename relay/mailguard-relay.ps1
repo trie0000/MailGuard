@@ -450,7 +450,13 @@ function Resolve-OutlookRecipient {
             resolved    = $true
             displayName = $rec.Name
         }
-        # Exchange ユーザなら部署情報取得
+        # AddressEntryUserType:
+        #   0 = ExchangeUser (個人), 1 = ExchangeDistributionList (= 配布リスト = ML),
+        #   11 = OutlookDistributionList (= 個人 DL), 30 = SmtpAddressEntry (= 外部)
+        $userType = $ae.AddressEntryUserType
+        $info.userType = $userType
+
+        # ── Exchange ユーザ (個人) ──────────────────────────────────────
         $exchangeUser = $null
         try { $exchangeUser = $ae.GetExchangeUser() } catch { }
         if ($exchangeUser) {
@@ -467,9 +473,80 @@ function Resolve-OutlookRecipient {
                 $mgr = $exchangeUser.GetExchangeUserManager()
                 if ($mgr) { $info.manager = $mgr.Name }
             } catch { }
-        } else {
-            # 配布リスト? 外部?
-            $info.type = if ($ae.AddressEntryUserType -eq 16) { 'exchange-dl' } else { 'external' }
+        }
+        # ── Exchange DL (= ML / 配布リスト) ─────────────────────────────
+        elseif ($userType -eq 1) {
+            $info.type = 'exchange-dl'
+            try {
+                $dl = $ae.GetExchangeDistributionList()
+                if ($dl) {
+                    $info.alias       = $dl.Alias
+                    $info.primarySmtp = $dl.PrimarySmtpAddress
+                    $info.displayName = $dl.Name
+                    # メンバー展開 (最大 50 名まで、入れ子 DL は 1 階層のみ)
+                    try {
+                        $members = $dl.GetExchangeDistributionListMembers()
+                        if ($members) {
+                            $memberList = @()
+                            $total = $members.Count
+                            $cap = [Math]::Min($total, 50)
+                            for ($i = 1; $i -le $cap; $i++) {
+                                try {
+                                    $m = $members.Item($i)
+                                    $mi = [ordered]@{
+                                        displayName = $m.Name
+                                        type        = 'exchange-user'
+                                    }
+                                    try {
+                                        $eu = $m.GetExchangeUser()
+                                        if ($eu) {
+                                            $mi.email       = $eu.PrimarySmtpAddress
+                                            $mi.department  = $eu.Department
+                                            $mi.jobTitle    = $eu.JobTitle
+                                            $mi.firstName   = $eu.FirstName
+                                            $mi.lastName    = $eu.LastName
+                                        }
+                                    } catch { }
+                                    if (-not $mi.email) {
+                                        try { $mi.email = $m.PrimarySmtpAddress } catch { }
+                                    }
+                                    $memberList += $mi
+                                } catch { }
+                            }
+                            $info.members      = @($memberList)
+                            $info.memberCount  = $total
+                        }
+                    } catch { }
+                }
+            } catch { }
+        }
+        # ── Outlook 個人 DL (= 連絡先グループ) ──────────────────────────
+        elseif ($userType -eq 11) {
+            $info.type = 'personal-dl'
+            try {
+                $members = $ae.Members
+                if ($members) {
+                    $memberList = @()
+                    $total = $members.Count
+                    $cap = [Math]::Min($total, 50)
+                    for ($i = 1; $i -le $cap; $i++) {
+                        try {
+                            $m = $members.Item($i)
+                            $mi = [ordered]@{
+                                displayName = $m.Name
+                                type        = 'personal-contact'
+                            }
+                            try { $mi.email = $m.Address } catch { }
+                            $memberList += $mi
+                        } catch { }
+                    }
+                    $info.members     = @($memberList)
+                    $info.memberCount = $total
+                }
+            } catch { }
+        }
+        else {
+            $info.type = 'external'
         }
         $script:OutlookResolveCache[$key] = $info
         return $info

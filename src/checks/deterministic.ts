@@ -3,14 +3,19 @@
 // AI を使わずに正規表現 / 辞書 突合で確実に拾えるパターンだけ高精度に拾う。
 // 偽陽性ゼロを目指す (= 「絶対これは問題」というケースだけ flag)。
 
-import { ParsedMail, DeterministicHit, Settings } from '../types';
+import { ParsedMail, DeterministicHit, Settings, RecipientInfo } from '../types';
+import { flattenMemberNames } from '../relay/outlook-client';
 
-export function runDeterministicChecks(mail: ParsedMail, settings: Settings): DeterministicHit[] {
+export function runDeterministicChecks(
+  mail: ParsedMail,
+  settings: Settings,
+  recipientInfo: RecipientInfo[] = [],
+): DeterministicHit[] {
   const hits: DeterministicHit[] = [];
   hits.push(...checkInternalInCcOnExternal(mail, settings));
   hits.push(...checkTypoDomains(mail, settings));
   hits.push(...checkConfidentialKeywords(mail, settings));
-  hits.push(...checkSalutationVsTo(mail));
+  hits.push(...checkSalutationVsTo(mail, recipientInfo));
   hits.push(...checkSubjectTagInBody(mail));
   hits.push(...checkNewParticipants(mail));
   return hits;
@@ -77,18 +82,37 @@ function checkConfidentialKeywords(mail: ParsedMail, settings: Settings): Determ
 }
 
 // ── 4. 本文冒頭の宛名 vs 実 To ─────────────────────────────────────
-function checkSalutationVsTo(mail: ParsedMail): DeterministicHit[] {
+//   ★ ML (= Distribution List) 宛の場合は、ML メンバーの displayName でも
+//      照合する。例: To=sales-team@xxx, 本文「鈴木様」 → メンバーに鈴木さんがいれば OK
+function checkSalutationVsTo(mail: ParsedMail, recipientInfo: RecipientInfo[]): DeterministicHit[] {
   const salutation = extractSalutation(mail.latestReply);
   if (!salutation) return [];
   if (mail.to.length === 0) {
     return [{ category: '宛名不一致', severity: 'high', detail: `本文冒頭は "${salutation}" 宛だが、To が空です` }];
   }
-  // 名前の正規化: 「○○ 株式会社」「○○様」のような表記から抽出済みなので
-  // 構成要素 (= 苗字 / 会社名) のいずれかが To の name 部分に含まれるか確認。
-  const targetNames = mail.to.map(t => t.name).filter(Boolean);
-  const targetEmailLocals = mail.to.map(t => t.email.split('@')[0] ?? '').filter(Boolean);
+
+  // 照合対象を構築:
+  //   - To の displayName (= "山田 太郎 <yamada@...>" の "山田 太郎")
+  //   - To のメアド local part
+  //   - ML 宛の場合: ML メンバー全員の displayName / lastName / firstName
+  const targetNames: string[] = [];
+  const targetEmailLocals: string[] = [];
+  let hasMlExpansion = false;
+  for (const t of mail.to) {
+    if (t.name) targetNames.push(t.name);
+    const local = t.email.split('@')[0];
+    if (local) targetEmailLocals.push(local);
+    // GAL から ML 情報があれば、メンバー名も照合候補に追加
+    const info = recipientInfo.find(r => r.email.toLowerCase() === t.email.toLowerCase());
+    if (info && (info.type === 'exchange-dl' || info.type === 'personal-dl')) {
+      const memberNames = flattenMemberNames(info);
+      targetNames.push(...memberNames);
+      if (memberNames.length > 0) hasMlExpansion = true;
+    }
+  }
+
   if (targetNames.length === 0 && targetEmailLocals.every(l => !l)) return [];
-  // salutation を細かく分解 (= 「ABC 株式会社 田中様」 → ABC, 株式会社, 田中)
+
   const tokens = tokenizeSalutation(salutation);
   if (tokens.length === 0) return [];
 
@@ -99,11 +123,13 @@ function checkSalutationVsTo(mail: ParsedMail): DeterministicHit[] {
     return hayNames.includes(t) || hayLocals.includes(t);
   });
   if (matched) return [];
-  return [{
-    category: '宛名不一致',
-    severity: 'high',
-    detail: `本文冒頭の宛名 "${salutation}" と To の名前 "${targetNames.join(', ') || mail.to.map(t => t.email).join(', ')}" に一致が見つかりません`,
-  }];
+
+  // ML 展開済みでも見つからなかった場合は、その旨を detail に含める
+  const toLabel = mail.to.map(t => t.email).join(', ');
+  const detail = hasMlExpansion
+    ? `本文冒頭の宛名 "${salutation}" は To (${toLabel}) の displayName / メアド / ML メンバー (= ${targetNames.length} 名) のいずれにも一致しません`
+    : `本文冒頭の宛名 "${salutation}" と To "${toLabel}" の名前に一致が見つかりません`;
+  return [{ category: '宛名不一致', severity: 'high', detail }];
 }
 
 /** 「○○様」「○○ 株式会社」など本文冒頭の宛名を抽出 */

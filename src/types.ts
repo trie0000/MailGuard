@@ -65,8 +65,13 @@ export interface RecipientInfo {
   firstName?: string;
   lastName?: string;
   manager?: string;
-  /** 'exchange-user' = GAL 内 / 'exchange-dl' = 配布リスト / 'external' = 外部 / 'unresolved' = 解決失敗 */
-  type?: 'exchange-user' | 'exchange-dl' | 'external' | 'unresolved';
+  /** 'exchange-user' = GAL 内 / 'exchange-dl' = ML / 'personal-dl' = 個人連絡先グループ
+   *  / 'external' = 外部 / 'unresolved' = 解決失敗 */
+  type?: 'exchange-user' | 'exchange-dl' | 'personal-dl' | 'external' | 'unresolved' | 'personal-contact';
+  /** ML / DL のメンバー (= type='exchange-dl' / 'personal-dl' 時に設定) */
+  members?: RecipientInfo[];
+  /** メンバー総数 (= members は最大 50 件まで返るが、本来の件数) */
+  memberCount?: number;
   error?: string;
 }
 
