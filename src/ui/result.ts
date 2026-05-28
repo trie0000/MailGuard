@@ -6,19 +6,43 @@ export function renderResult(result: CombinedResult): HTMLElement {
   const aiResult = aiOk ? (result.ai as Exclude<typeof result.ai, { error: string }>) : null;
   const aiError = !aiOk ? (result.ai as { error: string }).error : null;
 
-  // 総合リスク = max(決定論 最高 severity, AI riskLevel)
-  //   AI の個別 issue.severity ではなく AI の総合判断 (= riskLevel) を採用する。
-  //   理由: AI が「ご担当者様 + ML は問題なし → riskLevel='low'」と総合判断していても、
-  //         過去の挙動では issues 配列に severity='high' が 1 件でもあれば overall=high に
-  //         なってしまい、サマリの低リスク表記と矛盾する状態が起きていた。
-  //         AI の riskLevel は文脈を踏まえた最終判断なので そちらを信頼する。
+  // ── 総合リスク 算定 ──────────────────────────────────────────────────
+  //   ルールベース検出を 2 種類に分けて扱う:
+  //
+  //     Hard (= 確定事実): タイポ / 内部混入 / 機密外部
+  //        正規表現・辞書で機械的に確定する事実なので、AI でも下げられない floor。
+  //
+  //     Soft (= 推測 heuristic): 宛名不一致 / 件名タグ不一致 / 新規参加者
+  //        文脈次第で正当な可能性があるため、AI が成功していれば AI の総合判断
+  //        (= riskLevel) に委ねる。AI はプロンプトで これら hit を受け取った上で
+  //        最終判断しているので、AI が low と言うなら soft hit で上書きしない。
+  //
+  //   これにより「ML 宛の "ご担当者様" を 宛名不一致 (soft) が high にしても、
+  //   AI が low と判断すれば overall=low」 となり、サマリと バナーの矛盾が消える。
+  //   一方で タイポ等の hard は AI が見落としても必ず効く。
   const order: Record<string, number> = { ok: 0, low: 1, medium: 2, high: 3 };
-  const detMax: 'ok' | 'low' | 'medium' | 'high' = result.deterministic.length === 0 ? 'ok'
-    : result.deterministic.some(h => h.severity === 'high') ? 'high'
-    : result.deterministic.some(h => h.severity === 'medium') ? 'medium'
-    : 'low';
+  const HARD_CATEGORIES = new Set<DeterministicHit['category']>(['タイポ', '内部混入', '機密外部']);
+  const maxSev = (hits: { severity: 'high' | 'medium' | 'low' }[]): 'ok' | 'low' | 'medium' | 'high' =>
+    hits.length === 0 ? 'ok'
+      : hits.some(h => h.severity === 'high') ? 'high'
+      : hits.some(h => h.severity === 'medium') ? 'medium'
+      : 'low';
+
+  const hardHits = result.deterministic.filter(h => HARD_CATEGORIES.has(h.category));
+  const softHits = result.deterministic.filter(h => !HARD_CATEGORIES.has(h.category));
+  const hardMax = maxSev(hardHits);
+  const softMax = maxSev(softHits);
   const aiLevel: 'ok' | 'low' | 'medium' | 'high' = aiResult?.riskLevel ?? 'ok';
-  const overall = (order[detMax]! >= order[aiLevel]!) ? detMax : aiLevel;
+
+  // AI 成功時: soft は AI に委譲 (= max(hard, AI))。AI 失敗時: 安全側で全ルール採用。
+  const pickMax = (...lv: ('ok' | 'low' | 'medium' | 'high')[]) =>
+    lv.reduce((m, c) => (order[c]! > order[m]!) ? c : m, 'ok' as 'ok' | 'low' | 'medium' | 'high');
+  const overall = aiOk
+    ? pickMax(hardMax, aiLevel)
+    : pickMax(hardMax, softMax);
+
+  // AI が soft ルールの判定を 下方修正したか (= バナーで「AI が再評価して降格」と注記用)
+  const aiDowngradedSoft = aiOk && order[softMax]! > order[overall]!;
 
   return el('div', {
     style: 'background:#fff;border-radius:10px;padding:20px;border:1px solid #e8e4d8',
@@ -30,6 +54,7 @@ export function renderResult(result: CombinedResult): HTMLElement {
       result.deterministic,
       aiOk,
       aiError,
+      aiDowngradedSoft,
     ),
 
     // 決定論ルール ヒット
@@ -124,6 +149,7 @@ function renderOverallBanner(
   detHits: DeterministicHit[],
   aiOk: boolean,
   aiError: string | null,
+  aiDowngradedSoft: boolean,
 ): HTMLElement {
   const palette: Record<string, { bg: string; border: string; color: string; icon: string; label: string }> = {
     high: { bg: '#fef2f2', border: '#dc2626', color: '#991b1b', icon: '🚨', label: '高リスク — 送信前に必ず確認' },
@@ -170,6 +196,14 @@ function renderOverallBanner(
       // ★ ルールベース と AI の 2 行サマリ (= 必ず両方表示)
       el('div', { style: 'font-size:13px;line-height:1.7;margin-top:4px' }, [detSummary]),
       el('div', { style: 'font-size:13px;line-height:1.7' }, [aiLine]),
+      // AI が推測ルール (soft) を再評価して総合リスクを下げた場合の注記
+      ...(aiDowngradedSoft ? [
+        el('div', { style: 'font-size:12px;line-height:1.6;margin-top:4px;opacity:0.9' }, [
+          'ℹ ルールベースの推測検出 (宛名 / 件名タグ / 新規参加者) は AI が文脈を踏まえて'
+          + '再評価し、総合リスクを上記レベルに調整しました (= タイポ / 内部混入 / 機密漏洩 の'
+          + '確定検出はこの調整の対象外で、常に総合リスクへ反映されます)。',
+        ]),
+      ] : []),
     ]),
   ]);
 }
