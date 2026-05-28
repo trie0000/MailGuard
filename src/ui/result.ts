@@ -38,21 +38,67 @@ export function renderResult(result: CombinedResult): HTMLElement {
     // AI 結果
     el('div', { style: 'margin-top:18px' }, [
       sectionHeader('🤖 AI 解析結果',
-        aiOk ? `${aiResult!.issues.length} 件 / 信頼度 ${Math.round((aiResult!.confidence ?? 0) * 100)}%`
-             : '失敗'),
+        aiOk ? `${aiResult!.issues.length} 件 / 判定: ${aiRiskLabel(aiResult!.riskLevel)} / 信頼度 ${Math.round((aiResult!.confidence ?? 0) * 100)}%`
+             : '失敗 (= スキップではなく エラーで未完了)'),
       aiError
-        ? el('div', { style: 'font-size:13px;color:#991b1b;padding:8px 12px;background:#fee2e2;border-radius:6px' }, [aiError])
-        : aiResult!.issues.length === 0
-          ? el('div', { style: 'font-size:13px;color:#7a766c;padding:6px 0' }, ['(AI: 問題なし)'])
-          : el('div', {}, aiResult!.issues.map(renderAIIssue)),
-      ...(aiResult?.summary && aiResult.issues.length > 0 ? [
-        el('div', {
-          style: 'margin-top:10px;padding:8px 12px;background:#f3f1ea;border-radius:6px;'
-               + 'font-size:12px;color:#7a766c;line-height:1.7;font-style:italic',
-        }, ['💬 AI 総評: ' + aiResult.summary]),
-      ] : []),
+        ? el('div', { style: 'font-size:13px;color:#991b1b;padding:10px 12px;background:#fee2e2;border-radius:6px;line-height:1.6' }, [
+            el('div', { style: 'font-weight:700;margin-bottom:4px' }, ['✗ AI 解析が失敗しました']),
+            el('div', {}, [aiError]),
+            el('div', { style: 'margin-top:6px;font-size:11px;opacity:0.85' }, [
+              '対処: 設定で API キーと プロバイダ / モデルを確認。 社内環境なら .env に MAILGUARD_AI_PROXY を設定。',
+            ]),
+          ])
+        : renderAiOkBlock(aiResult!),
     ]),
   ]);
+}
+
+/** AI が成功した時のブロック (= 0 件でも「実行完了したこと」を必ず示す) */
+function renderAiOkBlock(ai: { riskLevel: string; confidence: number; issues: AIIssue[]; summary: string; raw?: string }): HTMLElement {
+  const noIssues = ai.issues.length === 0;
+  return el('div', {}, [
+    // 必ず表示する確認バナー (= AI が動いたかどうかを一目で判別)
+    el('div', {
+      style: 'padding:8px 12px;background:#ecfdf5;border-left:3px solid #10b981;border-radius:0 6px 6px 0;'
+           + 'margin-bottom:8px;font-size:12px;color:#065f46;line-height:1.6',
+    }, [
+      el('div', { style: 'font-weight:700' }, [
+        `✓ AI 解析 完了 — 判定: ${aiRiskLabel(ai.riskLevel)} / 検出 ${ai.issues.length} 件 / 信頼度 ${Math.round((ai.confidence ?? 0) * 100)}%`,
+      ]),
+      ai.summary
+        ? el('div', { style: 'margin-top:4px' }, ['💬 ' + ai.summary])
+        : el('div', { style: 'margin-top:4px;font-style:italic;opacity:0.85' }, [
+            noIssues ? '(AI から問題指摘なし — 件名 / 本文 / 宛先 / 添付 を解析した結果、誤送信の兆候は検出されませんでした)' : '(総評なし)',
+          ]),
+    ]),
+    // 個別 issue
+    noIssues
+      ? el('div', { style: 'font-size:13px;color:#7a766c;padding:6px 0' }, ['(個別の指摘なし)'])
+      : el('div', {}, ai.issues.map(renderAIIssue)),
+    // 生応答 (= 開いて中身を確認できる details/summary)
+    ...(ai.raw ? [
+      el('details', { style: 'margin-top:8px' }, [
+        el('summary', { style: 'cursor:pointer;font-size:11px;color:#a8a39a;user-select:none' }, [
+          '🔍 AI 生応答を表示 (= 判定根拠の確認用)',
+        ]),
+        el('pre', {
+          style: 'margin:6px 0 0;padding:10px;background:#f3f1ea;border-radius:6px;'
+               + 'font-size:11px;color:#555;line-height:1.5;white-space:pre-wrap;word-break:break-all;'
+               + 'max-height:240px;overflow:auto',
+        }, [ai.raw]),
+      ]),
+    ] : []),
+  ]);
+}
+
+function aiRiskLabel(level: string): string {
+  switch (level) {
+    case 'high': return '🔴 高リスク';
+    case 'medium': return '🟡 中リスク';
+    case 'low': return '🔵 低リスク';
+    case 'ok': return '✅ 問題なし';
+    default: return level || '?';
+  }
 }
 
 function sectionHeader(label: string, badge: string): HTMLElement {
