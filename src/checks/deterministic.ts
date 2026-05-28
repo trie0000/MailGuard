@@ -82,22 +82,32 @@ function checkConfidentialKeywords(mail: ParsedMail, settings: Settings): Determ
 }
 
 // ── 4. 本文冒頭の宛名 vs 実 To ─────────────────────────────────────
-//   ★ ML (= Distribution List) 宛の場合は、ML メンバーの displayName でも
-//      照合する。例: To=sales-team@xxx, 本文「鈴木様」 → メンバーに鈴木さんがいれば OK
+//   ルール:
+//     - To と本文の宛名が一致しない → 誤送信 high リスク
+//     - To が ML の場合は、ML メンバー (= displayName / lastName / firstName) に
+//       本文の宛名が含まれていれば 問題なし (= 警告しない)
+//     - ML メンバー情報が GAL / CSV から取得できなかった場合は判断保留 (= 警告しない)
+//
+//   例:
+//     OK : To=tanaka@xxx <田中 太郎>, 本文「田中様」
+//     NG : To=tanaka@xxx, 本文「鈴木様」
+//     OK : To=sales-team@xxx (メンバー: 田中/鈴木/山田), 本文「鈴木様」
+//     NG : To=sales-team@xxx (メンバー: 田中/鈴木/山田), 本文「佐藤様」
 function checkSalutationVsTo(mail: ParsedMail, recipientInfo: RecipientInfo[]): DeterministicHit[] {
   const salutation = extractSalutation(mail.latestReply);
   if (!salutation) return [];
   if (mail.to.length === 0) {
-    return [{ category: '宛名不一致', severity: 'high', detail: `本文冒頭は "${salutation}" 宛だが、To が空です` }];
+    return [{ category: '宛名不一致', severity: 'high', detail: `本文冒頭は "${salutation}" 宛ですが、To が空です (= 送信先未設定の誤送信リスク)` }];
   }
 
   // 照合対象を構築:
   //   - To の displayName (= "山田 太郎 <yamada@...>" の "山田 太郎")
-  //   - To のメアド local part
+  //   - To のメアド local part (= "tanaka.taro@..." → "tanaka.taro")
   //   - ML 宛の場合: ML メンバー全員の displayName / lastName / firstName
   const targetNames: string[] = [];
   const targetEmailLocals: string[] = [];
   let hasMlExpansion = false;
+  let hasMlWithoutMembers = false;   // ML だがメンバー情報が無い (= GAL/CSV 未解決)
   for (const t of mail.to) {
     if (t.name) targetNames.push(t.name);
     const local = t.email.split('@')[0];
@@ -106,8 +116,12 @@ function checkSalutationVsTo(mail: ParsedMail, recipientInfo: RecipientInfo[]): 
     const info = recipientInfo.find(r => r.email.toLowerCase() === t.email.toLowerCase());
     if (info && isDistributionList(info)) {
       const memberNames = flattenMemberNames(info);
-      targetNames.push(...memberNames);
-      if (memberNames.length > 0) hasMlExpansion = true;
+      if (memberNames.length > 0) {
+        targetNames.push(...memberNames);
+        hasMlExpansion = true;
+      } else {
+        hasMlWithoutMembers = true;
+      }
     }
   }
 
@@ -124,28 +138,49 @@ function checkSalutationVsTo(mail: ParsedMail, recipientInfo: RecipientInfo[]): 
   });
   if (matched) return [];
 
-  // ML 展開済みでも見つからなかった場合は、その旨を detail に含める
-  const toLabel = mail.to.map(t => t.email).join(', ');
+  // ★ 判断保留: ML 宛で メンバー情報が取れなかった場合は警告しない (= 偽陽性を避ける)
+  //   例: 外部 ML で GAL に無く、CSV も登録されてない → メンバー不明 → high と
+  //       決めるには情報不足。AI 側で文脈判断に委ねる。
+  if (hasMlWithoutMembers && !hasMlExpansion) return [];
+
+  // 不一致 → high
+  const toLabel = mail.to.map(t => t.name ? `${t.name} <${t.email}>` : t.email).join(', ');
   const detail = hasMlExpansion
-    ? `本文冒頭の宛名 "${salutation}" は To (${toLabel}) の displayName / メアド / ML メンバー (= ${targetNames.length} 名) のいずれにも一致しません`
-    : `本文冒頭の宛名 "${salutation}" と To "${toLabel}" の名前に一致が見つかりません`;
+    ? `本文冒頭の宛名 "${salutation}" が To の ML メンバー (${targetNames.length} 名) に存在しません。`
+      + ` To=${toLabel}。 別の人宛のメールを ML に投げている可能性があります (= 誤送信 high リスク)。`
+    : `本文冒頭の宛名 "${salutation}" と To "${toLabel}" の名前が一致しません。`
+      + ` 別人宛の下書きを誤った宛先に送ろうとしている可能性があります (= 誤送信 high リスク)。`;
   return [{ category: '宛名不一致', severity: 'high', detail }];
 }
 
-/** 「○○様」「○○ 株式会社」など本文冒頭の宛名を抽出 */
+/** 「○○様」「○○ 株式会社」など本文冒頭の宛名を抽出。
+ *  本文の最初 10 行を 1 行ずつ走査し、定型挨拶 (= 「お世話になっております」等) を
+ *  スキップして最初の宛名行を返す。 */
 export function extractSalutation(latestReply: string): string | null {
   if (!latestReply) return null;
-  const head = latestReply.split('\n').slice(0, 4).join('\n').trim();
-  if (!head) return null;
-  // パターン 1: 「○○ 様」「○○ 御中」「○○ 殿」「○○ さん」
-  const m1 = head.match(/^[\s　]*([^\s　、,。\n]{1,40}?)[ 　]*(様|御中|殿|さん|さま)\b/);
-  if (m1) return (m1[1]! + m1[2]!).trim();
-  // パターン 2: 「○○ 株式会社 御中」(複数語)
-  const m2 = head.match(/^[\s　]*([^\n]{1,60}?)(株式会社|有限会社|合同会社|合資会社)(.*?(御中|殿))?/);
-  if (m2) return (m2[0] ?? '').trim();
-  // パターン 3: 英語 "Dear Mr/Ms ..."
-  const m3 = head.match(/^Dear\s+(?:Mr|Ms|Mrs|Dr)\.?\s+([A-Za-z][A-Za-z\-' ]{1,40})/i);
-  if (m3) return 'Dear ' + (m3[1] ?? '').trim();
+  const lines = latestReply.split('\n').slice(0, 10).map(s => s.trim()).filter(Boolean);
+  if (lines.length === 0) return null;
+
+  // 純粋な挨拶のみの行 (= 宛名を含まない) は skip
+  const greetingOnly = /^(お世話に|いつもお世話|平素は|拝啓|拝復|ご返信|ご連絡|ご対応|お疲れ|お忙しい)/;
+
+  for (const line of lines) {
+    // スキップ: 挨拶のみで「様/御中/殿」を含まない行
+    if (greetingOnly.test(line) && !/(様|御中|殿|さん|さま|Dear\s)/i.test(line)) continue;
+
+    // パターン 1: 「○○ 様」「○○ 御中」「○○ 殿」「○○ さん」
+    //   行頭スペース可。1 行内のどこに現れてもよい (= 「拝啓 田中様」のような前置きも拾う)
+    const m1 = line.match(/(?:^|[\s　])([^\s　、,。\n]{1,40}?)[ 　]*(様|御中|殿|さん|さま)(?:[、,。\s　]|$)/);
+    if (m1) return (m1[1]! + m1[2]!).trim();
+
+    // パターン 2: 「○○ 株式会社 御中」 (= 行に法人格を含む場合は行全体を宛名扱い)
+    const m2 = line.match(/^([^\n]{1,60}?)(株式会社|有限会社|合同会社|合資会社)(.*?(御中|殿))?/);
+    if (m2) return (m2[0] ?? '').trim();
+
+    // パターン 3: 英語 "Dear Mr/Ms ..."
+    const m3 = line.match(/Dear\s+(?:Mr|Ms|Mrs|Dr)\.?\s+([A-Za-z][A-Za-z\-' ]{1,40})/i);
+    if (m3) return 'Dear ' + (m3[1] ?? '').trim();
+  }
   return null;
 }
 
