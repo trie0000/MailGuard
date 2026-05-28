@@ -26,6 +26,7 @@ export const DEFAULT_SYSTEM_PROMPT = `あなたはメール誤送信検出の専
      - 本文宛名が 総称 / 役職名 (= 「各位」「ご担当者様」「部長様」「○○ 御中」 等)
        で To が ML / 配布リスト の場合は ML 全員宛の正当な表現 → **low** (= 警告まで)
        (= 個人名照合は対象外。本文内容と ML 目的が合ってるかは別途確認)
+       この場合、宛名不一致系の issue を severity=high にしてはいけない (= low 固定)。
   2. 本文の話題と過去履歴の話題は連続しているか
   3. 本文に固有名詞 (会社名 / 案件 ID / 製品名) が出る場合、To と整合するか
   4. 文体・敬語レベルは過去スレッドと一貫しているか
@@ -71,6 +72,14 @@ export const DEFAULT_SYSTEM_PROMPT = `あなたはメール誤送信検出の専
   - high: 誤送信の可能性が極めて高い (= 別人・別案件)
   - medium: 違和感はあるが正当な可能性も残る (= 要確認)
   - low: 軽微 (= 表記ゆれ・敬称差 等)
+
+★ 整合性ルール (必須):
+  - riskLevel と issues の severity は矛盾してはいけない
+  - 例: riskLevel='low' なのに issues に severity='high' が含まれている → NG
+  - 「ご担当者様 + ML」のように 警告レベルで十分なケースで riskLevel='low' とした場合、
+    関連する issue の severity も 'low' にする (= 個別 issue を high にして総合 low の
+    矛盾応答は禁止)
+  - 個別 issue で 1 つでも severity='high' を出すなら、riskLevel='high' にすること
 
 問題なし時は { "riskLevel": "ok", "confidence": ..., "issues": [], "summary": "..." } を返してください。
 

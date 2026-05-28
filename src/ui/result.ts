@@ -6,17 +6,19 @@ export function renderResult(result: CombinedResult): HTMLElement {
   const aiResult = aiOk ? (result.ai as Exclude<typeof result.ai, { error: string }>) : null;
   const aiError = !aiOk ? (result.ai as { error: string }).error : null;
 
-  // 総合リスク = max(decisive hits の最高 severity, ai.riskLevel)
-  const allSev = [
-    ...result.deterministic.map(h => h.severity),
-    ...(aiResult ? aiResult.issues.map(i => i.severity) : []),
-  ];
-  const overall = aiResult?.riskLevel === 'ok' && result.deterministic.length === 0
-    ? 'ok'
-    : allSev.includes('high') ? 'high'
-    : allSev.includes('medium') ? 'medium'
-    : allSev.includes('low') ? 'low'
-    : (aiResult?.riskLevel ?? 'ok');
+  // 総合リスク = max(決定論 最高 severity, AI riskLevel)
+  //   AI の個別 issue.severity ではなく AI の総合判断 (= riskLevel) を採用する。
+  //   理由: AI が「ご担当者様 + ML は問題なし → riskLevel='low'」と総合判断していても、
+  //         過去の挙動では issues 配列に severity='high' が 1 件でもあれば overall=high に
+  //         なってしまい、サマリの低リスク表記と矛盾する状態が起きていた。
+  //         AI の riskLevel は文脈を踏まえた最終判断なので そちらを信頼する。
+  const order: Record<string, number> = { ok: 0, low: 1, medium: 2, high: 3 };
+  const detMax: 'ok' | 'low' | 'medium' | 'high' = result.deterministic.length === 0 ? 'ok'
+    : result.deterministic.some(h => h.severity === 'high') ? 'high'
+    : result.deterministic.some(h => h.severity === 'medium') ? 'medium'
+    : 'low';
+  const aiLevel: 'ok' | 'low' | 'medium' | 'high' = aiResult?.riskLevel ?? 'ok';
+  const overall = (order[detMax]! >= order[aiLevel]!) ? detMax : aiLevel;
 
   return el('div', {
     style: 'background:#fff;border-radius:10px;padding:20px;border:1px solid #e8e4d8',
