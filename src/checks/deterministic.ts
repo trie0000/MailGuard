@@ -97,6 +97,7 @@ function checkConfidentialKeywords(mail: ParsedMail, settings: Settings): Determ
 //     NG : To=sales-team@xxx (メンバー: 田中/鈴木/山田), 本文「佐藤様」
 //     LOW: To=external-ml@xxx (メンバー不明), 本文「鈴木様」、
 //          かつ 過去履歴に「To=external-ml@xxx, 本文『鈴木様』」が既出
+//     LOW: To=ml@xxx, 本文「各位」「ご担当者様」「部長様」など一般名 (= ML 宛なら正当な使い方)
 function checkSalutationVsTo(mail: ParsedMail, recipientInfo: RecipientInfo[]): DeterministicHit[] {
   const salutation = extractSalutation(mail.latestReply);
   if (!salutation) return [];
@@ -141,6 +142,24 @@ function checkSalutationVsTo(mail: ParsedMail, recipientInfo: RecipientInfo[]): 
     return hayNames.includes(t) || hayLocals.includes(t);
   });
   if (matched) return [];
+
+  // ★ 一般名宛 × ML: 本文宛名が「各位 / ご担当者様 / 部長様」等の総称・役職名で、
+  //   かつ To が ML / 配布リスト の場合は、個人名で照合しても絶対に一致しないが
+  //   ML 全員宛の正当な表現なので、ルールベースでは "low" (= 警告表示までに留める)。
+  //   GAL/CSV でメンバーが見えてる ML / 見えてない ML 両方でこの扱い。
+  const toIsMl = mail.to.some(t => {
+    const info = recipientInfo.find(r => r.email.toLowerCase() === t.email.toLowerCase());
+    return info && isDistributionList(info);
+  }) || hasMlExpansion || hasMlWithoutMembers;
+  if (toIsMl && isGenericSalutation(salutation)) {
+    const toLabelMl = mail.to.map(t => t.name ? `${t.name} <${t.email}>` : t.email).join(', ');
+    return [{
+      category: '宛名不一致',
+      severity: 'low',
+      detail: `本文宛名 "${salutation}" は一般的な総称 / 役職名で、To が ML / 配布リスト (${toLabelMl}) のため`
+            + ` 個人名照合は対象外 (= 警告表示まで)。 本文の宛名がメールの目的と合っているか念のため確認してください。`,
+    }];
+  }
 
   // ★ 判断保留: ML 宛で メンバー情報が取れなかった場合は警告しない (= 偽陽性を避ける)
   //   例: 外部 ML で GAL に無く、CSV も登録されてない → メンバー不明 → high と
@@ -269,6 +288,48 @@ export function extractSalutation(latestReply: string): string | null {
     if (m3) return 'Dear ' + (m3[1] ?? '').trim();
   }
   return null;
+}
+
+/** 本文宛名が「個人名ではなく総称 / 役職名」かを判定。
+ *  該当例: 各位 / ご担当者様 / 担当者様 / 関係者各位 / 関係者様 / 皆様 / お客様 /
+ *          御中 (= 法人格部分は別判定) / 部長様 / 課長様 / マネージャー様 / etc.
+ *  これらが本文宛名の場合は、To が ML なら絶対に個人名一致しないので警告レベルを下げる。 */
+export function isGenericSalutation(salutation: string): boolean {
+  if (!salutation) return false;
+  const s = salutation.trim();
+  // 単独で 完全一致する 総称表現
+  const exactGenerics = [
+    '各位', '関係者各位', 'ご関係者各位', 'メンバー各位', 'チーム各位',
+    'ご担当者様', '担当者様', 'ご担当様', 'ご担当者各位',
+    '皆様', 'みなさま', 'みな様', 'ご担当の皆様', '関係者の皆様',
+    'お客様', 'お客様各位', 'ご利用者様', 'ご利用者各位',
+    '関係者様', 'ご関係者様',
+  ];
+  if (exactGenerics.some(g => s === g || s === g + '殿' || s === g + 'さん')) return true;
+
+  // 役職名 + 様/殿/さん (= 個人名を伴わない役職呼び)
+  //   例: 「部長様」「課長様」「マネージャー様」「センター長様」
+  //   人名 + 役職 + 様 (= 「田中部長 様」) は対象外 (= 個人名照合できる)
+  const titles = [
+    '社長', '副社長', '会長', '専務', '常務', '取締役', '監査役', '執行役員',
+    '部長', '副部長', '次長', '本部長', '室長', '局長', '部門長', '事業部長',
+    '課長', '副課長', '係長', '主任', '主幹', '主査', '主事', '主席',
+    'マネージャー', 'マネジャー', 'リーダー', 'チーフ', 'プロデューサー',
+    'ディレクター', 'プランナー', 'スペシャリスト',
+    'センター長', '所長', '工場長', '店長', '支店長', '営業所長',
+    '担当', '責任者', '管理者',
+  ];
+  for (const t of titles) {
+    // 役職 + 各位 / 様 / 殿 / さん で 個人名部分が無い (= 役職の直前に文字なし)
+    if (s === t + '各位' || s === t + '様' || s === t + '殿' || s === t + 'さん' || s === t) return true;
+    if (s === 'ご' + t + '様') return true;
+  }
+
+  // 法人格 + 御中 系 (= 「ABC 株式会社 御中」) は組織宛で個人名照合できない
+  if (/^(株式会社|有限会社|合同会社|合資会社|.+(株式会社|有限会社|合同会社|合資会社))\s*御中$/.test(s)) return true;
+  if (/御中$/.test(s)) return true;   // 「ABC 御中」「○○部 御中」等 一般化
+
+  return false;
 }
 
 function tokenizeSalutation(s: string): string[] {
