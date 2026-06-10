@@ -34,15 +34,19 @@ export function renderResult(result: CombinedResult): HTMLElement {
   const softMax = maxSev(softHits);
   const aiLevel: 'ok' | 'low' | 'medium' | 'high' = aiResult?.riskLevel ?? 'ok';
 
-  // AI 成功時: soft は AI に委譲 (= max(hard, AI))。AI 失敗時: 安全側で全ルール採用。
+  // AI 成功時: soft は AI に委譲 (= max(hard, AI))。
+  // AI 失敗時: ルールベースだけで「問題なし」と判定しない。
+  //   - Hard ルール (= タイポ/内部混入/機密外部) が high なら 確定事実なので overall=high
+  //   - それ以外は overall='unknown' (= 解析未完了として警告表示)
+  type RiskLevel = 'ok' | 'low' | 'medium' | 'high' | 'unknown';
   const pickMax = (...lv: ('ok' | 'low' | 'medium' | 'high')[]) =>
     lv.reduce((m, c) => (order[c]! > order[m]!) ? c : m, 'ok' as 'ok' | 'low' | 'medium' | 'high');
-  const overall = aiOk
+  const overall: RiskLevel = aiOk
     ? pickMax(hardMax, aiLevel)
-    : pickMax(hardMax, softMax);
+    : (hardMax === 'high' ? 'high' : 'unknown');
 
   // AI が soft ルールの判定を 下方修正したか (= バナーで「AI が再評価して降格」と注記用)
-  const aiDowngradedSoft = aiOk && order[softMax]! > order[overall]!;
+  const aiDowngradedSoft = aiOk && order[softMax]! > order[overall as ('ok'|'low'|'medium'|'high')]!;
 
   return el('div', {
     style: 'background:#fff;border-radius:10px;padding:20px;border:1px solid #e8e4d8',
@@ -142,8 +146,9 @@ function sectionHeader(label: string, badge: string): HTMLElement {
   ]);
 }
 
+type OverallLevel = 'ok' | 'low' | 'medium' | 'high' | 'unknown';
 function renderOverallBanner(
-  level: string,
+  level: OverallLevel,
   confidence: number | null,
   aiSummary: string | null,
   detHits: DeterministicHit[],
@@ -156,6 +161,7 @@ function renderOverallBanner(
     medium: { bg: '#fef3c7', border: '#f59e0b', color: '#92400e', icon: '⚠', label: '中リスク — 一度確認をおすすめ' },
     low: { bg: '#fef3c7', border: '#f59e0b', color: '#92400e', icon: '💡', label: '低リスク — 軽微な指摘あり' },
     ok: { bg: '#ecfdf5', border: '#10b981', color: '#065f46', icon: '✅', label: '問題なし — 送信して OK' },
+    unknown: { bg: '#fef2f2', border: '#dc2626', color: '#991b1b', icon: '⚠', label: '解析できない — AI が応答せず判定不能。送信前に内容を必ず確認してください' },
   };
   const p = palette[level] ?? palette.ok!;
 
@@ -177,8 +183,11 @@ function renderOverallBanner(
       + ` — ${detCategories.join(', ')}`;
 
   // ── AI サマリ ──────────────────────────────────────────────────────
+  //   AI 失敗時は ルールベースだけで「問題なし」を出さない (= overall='unknown')。
+  //   理由: AI が応答していない時点で 誤送信の有無は判定できないため、ルールが
+  //         clean でも「OK」を出してはいけない (= 利用者に必ず確認を促す)。
   const aiLine = !aiOk
-    ? `🤖 AI: 解析失敗 (${(aiError ?? '').slice(0, 80)}…)`
+    ? `🤖 AI: 解析失敗 — relay 未起動 / API キー / プロキシ等を確認してください (${(aiError ?? '').slice(0, 80)}…)`
     : aiSummary
       ? `🤖 AI: ${aiSummary}`
       : '🤖 AI: 解析完了 — 個別指摘なし';
