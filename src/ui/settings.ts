@@ -7,7 +7,7 @@ import {
   CLAUDE_MODELS, CORP_AI_MODELS,
 } from '../types';
 import { DEFAULT_SYSTEM_PROMPT } from '../prompts';
-import { getSettings, setSettings } from '../settings';
+import { getSettings, setSettings, isDevMode } from '../settings';
 import { fetchEnvDefaults, normalizeProvider } from '../defaults';
 import { clearOutlookCache } from '../relay/outlook-client';
 
@@ -45,9 +45,13 @@ export function openSettingsModal(onClose: (newSettings: Settings) => void): voi
     el('p', { style: 'font-size:11px;color:#a8a39a;margin:6px 0 0;line-height:1.6' }, [text]);
 
   // ── Provider セレクタ ─────────────────────────────────────────────────
+  //   Claude (Anthropic 直接) は 開発者モード (= ?dev=1 で有効化) のときだけ表示。
+  //   普段の配布利用では 社内 AI のみ (= 個人 API キーでの社外送信を防ぐ)。
+  const dev = isDevMode();
+  const effectiveProvider = (!dev && current.provider === 'claude') ? 'corp' : current.provider;
   const providerSel = mkSelect([
-    { value: 'claude', label: 'Claude (Anthropic)', selected: current.provider === 'claude' },
-    { value: 'corp', label: '社内 AI (Azure OpenAI 互換)', selected: current.provider === 'corp' },
+    ...(dev ? [{ value: 'claude', label: 'Claude (Anthropic) [dev]', selected: effectiveProvider === 'claude' }] : []),
+    { value: 'corp', label: '社内 AI (Azure OpenAI 互換)', selected: effectiveProvider === 'corp' },
   ]);
   providerSel.style.width = '280px';
 
@@ -172,7 +176,7 @@ export function openSettingsModal(onClose: (newSettings: Settings) => void): voi
     onclick: () => {
       const next: Settings = {
         relayUrl: relayUrlInput.value.trim() || DEFAULT_SETTINGS.relayUrl,
-        provider: providerSel.value as Provider,
+        provider: (providerSel.value || 'corp') as Provider,
         claudeApiKey: claudeKeyInput.value.trim(),
         claudeModel: claudeModelSel.value || DEFAULT_SETTINGS.claudeModel,
         corpApiKey: corpKeyInput.value.trim(),
@@ -223,13 +227,16 @@ export function openSettingsModal(onClose: (newSettings: Settings) => void): voi
       const skipped: string[] = [];
 
       // provider: 'claude' | 'corp' に正規化 (= 別名 anthropic/openai も吸収)
+      // 開発者モード OFF のときは claude を適用しない (= select に選択肢が無い)
       const p = normalizeProvider(env.provider);
-      if (p) {
+      if (p && (p !== 'claude' || isDevMode())) {
         providerSel.value = p;
         providerSel.dispatchEvent(new Event('change', { bubbles: true }));
         applied.push(`provider=${p}`);
       } else {
-        skipped.push(`provider (env="${env.provider ?? ''}")`);
+        skipped.push(p === 'claude'
+          ? 'provider (claude は開発者モードのみ)'
+          : `provider (env="${env.provider ?? ''}")`);
       }
 
       // corp 系
@@ -276,7 +283,9 @@ export function openSettingsModal(onClose: (newSettings: Settings) => void): voi
   }, ['GAL/ML キャッシュ クリア']);
 
   // ── 組み立て ────────────────────────────────────────────────────────
-  modal.appendChild(el('h2', { style: 'margin:0 0 4px;font-size:18px;font-weight:700' }, ['⚙ AI 設定']));
+  modal.appendChild(el('h2', { style: 'margin:0 0 4px;font-size:18px;font-weight:700' }, [
+    '⚙ AI 設定' + (dev ? ' 🛠 (開発者モード — ?dev=0 で解除)' : ''),
+  ]));
   modal.appendChild(el('p', { style: 'margin:0 0 14px;font-size:12px;color:#7a766c;line-height:1.6' }, [
     'プロバイダ (Claude / 社内 AI) と API キー / モデル / 社内 AI のベース URL ・ デプロイプレフィクスを設定します。',
     el('br'),

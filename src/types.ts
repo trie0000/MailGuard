@@ -137,7 +137,8 @@ export interface Settings {
 
 export const DEFAULT_SETTINGS: Settings = {
   relayUrl: 'http://127.0.0.1:18100',
-  provider: 'claude',
+  // 既定は社内 AI (= claude は開発者モード ?dev=1 でのみ選択肢に出る)
+  provider: 'corp',
   claudeApiKey: '',
   claudeModel: 'claude-sonnet-4-5',
   corpApiKey: '',
