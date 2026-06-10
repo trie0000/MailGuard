@@ -139,11 +139,17 @@ function checkSalutationVsTo(mail: ParsedMail, recipientInfo: RecipientInfo[]): 
   const tokens = tokenizeSalutation(salutation);
   if (tokens.length === 0) return [];
 
-  const hayNames = targetNames.join(' ').toLowerCase();
-  const hayLocals = targetEmailLocals.join(' ').toLowerCase();
+  // ★ 照合は スペース除去 + 小文字化 で正規化して行う。
+  //   理由: CSV 氏名「白石　たかし」(全角空白入り) と 本文「白石たかし様」
+  //   (空白なしフルネーム) のようなスペース有無の揺れで不一致になるのを防ぐ。
+  //   名前同士は '|' 区切りで連結 (= 前の名前の末尾 + 次の名前の先頭 が偶然
+  //   つながって誤マッチするのを防ぐ)。
+  const norm = (x: string) => x.toLowerCase().replace(/[\s　]/g, '');
+  const hayNames = targetNames.map(norm).filter(Boolean).join('|');
+  const hayLocals = targetEmailLocals.map(norm).filter(Boolean).join('|');
   const matched = tokens.some(tok => {
-    const t = tok.toLowerCase();
-    return hayNames.includes(t) || hayLocals.includes(t);
+    const t = norm(tok);
+    return t.length >= 2 && (hayNames.includes(t) || hayLocals.includes(t));
   });
   if (matched) return [];
 
@@ -363,8 +369,12 @@ export function isGenericSalutation(salutation: string): boolean {
 
 function tokenizeSalutation(s: string): string[] {
   // 「ABC 株式会社 田中様」→ ["ABC", "株式会社", "田中"]
+  //
+  // ★ 敬称は「末尾に付く語」として剥がすこと。文字クラス /[様御中殿さんさま]/ で
+  //   一括除去すると「田中様」の 中 / 「殿村様」の 殿 / 「御手洗様」の 御 など
+  //   名前の一部まで消えて、トークンが空になり照合自体がスキップされるバグになる。
   return s
-    .replace(/[様御中殿さんさま]/g, ' ')
+    .replace(/(様|さま|さん|殿|どの|御中|各位)(?=[\s　、,。]|$)/g, ' ')
     .replace(/(株式会社|有限会社|合同会社)/g, ' $1 ')
     .split(/[\s　,、]/)
     .map(t => t.trim())

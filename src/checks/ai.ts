@@ -42,7 +42,11 @@ export async function runAICheck(
   if (supportsTemperature(settings)) req.temperature = 0.0;
   const resp = await chatCompletion(settings, req);
   const content = resp.choices?.[0]?.message?.content ?? '';
-  return parseAIResponse(content);
+  const result = parseAIResponse(content);
+  // 実際に送ったプロンプトを結果に添付 (= UI のトグルで「何が AI に渡ったか」を確認できる)
+  result.systemPrompt = systemPrompt;
+  result.userPrompt = userPrompt;
+  return result;
 }
 
 // メール本文 (= 最新返信文 + 引用履歴) を AI に渡す際の合計上限。

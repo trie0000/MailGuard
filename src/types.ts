@@ -38,6 +38,10 @@ export interface AICheckResult {
   issues: AIIssue[];
   summary: string;
   raw?: string;
+  /** AI に実際に送った system プロンプト全文 (= UI のトグルで確認用) */
+  systemPrompt?: string;
+  /** AI に実際に送った user プロンプト全文 (= GAL/ML 情報が渡ったかの確認用) */
+  userPrompt?: string;
 }
 
 export interface CombinedResult {

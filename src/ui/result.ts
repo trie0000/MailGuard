@@ -92,7 +92,7 @@ export function renderResult(result: CombinedResult): HTMLElement {
 }
 
 /** AI が成功した時のブロック (= 0 件でも「実行完了したこと」を必ず示す) */
-function renderAiOkBlock(ai: { riskLevel: string; confidence: number; issues: AIIssue[]; summary: string; raw?: string }): HTMLElement {
+function renderAiOkBlock(ai: { riskLevel: string; confidence: number; issues: AIIssue[]; summary: string; raw?: string; systemPrompt?: string; userPrompt?: string }): HTMLElement {
   const noIssues = ai.issues.length === 0;
   return el('div', {}, [
     // 必ず表示する確認バナー (= AI が動いたかどうかを一目で判別)
@@ -114,18 +114,22 @@ function renderAiOkBlock(ai: { riskLevel: string; confidence: number; issues: AI
       ? el('div', { style: 'font-size:13px;color:#7a766c;padding:6px 0' }, ['(個別の指摘なし)'])
       : el('div', {}, ai.issues.map(renderAIIssue)),
     // 生応答 (= 開いて中身を確認できる details/summary)
-    ...(ai.raw ? [
-      el('details', { style: 'margin-top:8px' }, [
-        el('summary', { style: 'cursor:pointer;font-size:11px;color:#a8a39a;user-select:none' }, [
-          '🔍 AI 生応答を表示 (= 判定根拠の確認用)',
-        ]),
-        el('pre', {
-          style: 'margin:6px 0 0;padding:10px;background:#f3f1ea;border-radius:6px;'
-               + 'font-size:11px;color:#555;line-height:1.5;white-space:pre-wrap;word-break:break-all;'
-               + 'max-height:240px;overflow:auto',
-        }, [ai.raw]),
-      ]),
-    ] : []),
+    ...(ai.raw ? [renderToggle('🔍 AI 生応答を表示 (= 判定根拠の確認用)', ai.raw)] : []),
+    // 実際に AI へ送った プロンプト全文 (= GAL / ML メンバー情報が渡ったかの確認用)
+    ...(ai.systemPrompt ? [renderToggle('📤 AI への system プロンプト全文', ai.systemPrompt)] : []),
+    ...(ai.userPrompt ? [renderToggle('📤 AI への user プロンプト全文 (= 宛先 / GAL / ML メンバー情報)', ai.userPrompt)] : []),
+  ]);
+}
+
+/** トグル (details/summary) で長文を折り畳み表示 */
+function renderToggle(label: string, content: string): HTMLElement {
+  return el('details', { style: 'margin-top:8px' }, [
+    el('summary', { style: 'cursor:pointer;font-size:11px;color:#a8a39a;user-select:none' }, [label]),
+    el('pre', {
+      style: 'margin:6px 0 0;padding:10px;background:#f3f1ea;border-radius:6px;'
+           + 'font-size:11px;color:#555;line-height:1.5;white-space:pre-wrap;word-break:break-all;'
+           + 'max-height:320px;overflow:auto',
+    }, [content]),
   ]);
 }
 
@@ -276,6 +280,22 @@ function renderRecipientRow(r: RecipientInfo, isCandidate = false): HTMLElement 
     if (r.officeLocation) meta.push('拠点: ' + r.officeLocation);
     if (r.manager) meta.push('上長: ' + r.manager);
     parts.push(el('div', { style: 'font-size:12px;margin-top:2px;color:' + palette.color + ';opacity:0.9' }, [meta.join(' / ') || '(詳細なし)']));
+    // ★ ML / DL の場合はメンバー名を表示 (= 宛名照合に使われた haystack の可視化。
+    //    「CSV のメンバーがブラウザまで届いてるか」をこの欄で直接確認できる)
+    if (r.members && r.members.length > 0) {
+      const srcLabel = r.source === 'csv' ? 'CSV' : 'GAL';
+      const names = r.members.map(m => m.displayName || m.email || '?').filter(Boolean);
+      const shown = names.slice(0, 30).join('、 ');
+      const more = (r.memberCount ?? names.length) > 30 ? ` … 他 ${(r.memberCount ?? names.length) - 30} 名` : '';
+      parts.push(el('div', {
+        style: 'font-size:11px;margin-top:4px;padding:6px 8px;background:rgba(255,255,255,0.6);'
+             + 'border-radius:4px;color:' + palette.color + ';line-height:1.6',
+      }, [`👥 ML メンバー ${r.memberCount ?? names.length} 名 (${srcLabel}): ${shown}${more}`]));
+    } else if (r.type === 'exchange-dl' || r.type === 'personal-dl' || r.type === 'ml-csv') {
+      parts.push(el('div', { style: 'font-size:11px;margin-top:4px;color:' + palette.color + ';opacity:0.85' }, [
+        '👥 ML / 配布リスト — メンバー情報なし (= 宛名照合は判断保留)',
+      ]));
+    }
   } else {
     parts.push(el('div', { style: 'font-size:12px;margin-top:2px;color:' + palette.color }, ['(GAL 未解決 / 外部メアド)']));
   }
