@@ -15,8 +15,40 @@ import { RecipientInfo, Settings } from '../types';
 
 // v2: ml-csv type 追加 / external キャッシュを短く (CSV を後から置いたケース対応)
 const CACHE_KEY = 'mailguard.outlook.resolve.v2';
+const RELAY_STARTED_KEY = 'mailguard.relay.startedAt';   // relay 再起動を検知してキャッシュ自動無効化用
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;   // 1 日 (resolved な GAL ユーザ)
 const CACHE_TTL_UNRESOLVED_MS = 5 * 60 * 1000;   // 5 分 (external / unresolved → CSV 追加で即反映できるよう短く)
+
+// 1 セッション 1 回だけ relay 起動時刻を確認する Promise (= 連発時の HTTP 往復回避)
+let relayCheckPromise: Promise<void> | null = null;
+
+/** relay の起動時刻 (= /health の startedAt) を取得し、前回保存していた値と
+ *  異なれば「relay が再起動された」と判断して localStorage の解決キャッシュを
+ *  自動クリアする。これにより CSV を ml/ フォルダに置いて relay を再起動すれば
+ *  ブラウザ側で手動操作不要で即座に新しい結果が反映される。
+ *  1 セッションで 1 回だけ実行 (= 同時に呼ばれても同じ Promise を共有)。 */
+async function ensureRelayCacheConsistency(settings: Settings): Promise<void> {
+  if (relayCheckPromise) return relayCheckPromise;
+  relayCheckPromise = (async () => {
+    try {
+      const url = `${settings.relayUrl.replace(/\/+$/, '')}/health`;
+      const res = await fetch(url);
+      if (!res.ok) return;
+      const data = await res.json() as { startedAt?: string };
+      if (!data.startedAt) return;
+      const stored = localStorage.getItem(RELAY_STARTED_KEY);
+      if (stored !== data.startedAt) {
+        try { localStorage.removeItem(CACHE_KEY); } catch { /* ignore */ }
+        try { localStorage.setItem(RELAY_STARTED_KEY, data.startedAt); } catch { /* ignore */ }
+        if (stored) {
+          console.log('[mailguard] relay 再起動を検知 → 解決キャッシュを自動クリア',
+            { prev: stored, current: data.startedAt });
+        }
+      }
+    } catch { /* relay 未起動等は無視 (= 既存キャッシュで動く) */ }
+  })();
+  return relayCheckPromise;
+}
 
 interface CacheEntry {
   info: RecipientInfo;
@@ -46,9 +78,12 @@ function getCached(email: string): RecipientInfo | null {
   return entry.info;
 }
 
-/** Outlook GAL / CSV ML キャッシュを全クリア (= 設定画面から呼出し) */
+/** Outlook GAL / CSV ML キャッシュを全クリア (= 設定画面から呼出し)。
+ *  RELAY_STARTED_KEY も剥がして、次のリクエストで relay と再同期させる。 */
 export function clearOutlookCache(): void {
   try { localStorage.removeItem(CACHE_KEY); } catch { /* ignore */ }
+  try { localStorage.removeItem(RELAY_STARTED_KEY); } catch { /* ignore */ }
+  relayCheckPromise = null;   // 次の呼び出しで /health 再問い合わせ
 }
 
 function setCached(email: string, info: RecipientInfo): void {
@@ -67,6 +102,9 @@ export async function batchResolveRecipients(
     emails.map(e => e.toLowerCase().trim()).filter(Boolean),
   ));
   if (unique.length === 0) return [];
+
+  // relay の再起動を検知してキャッシュ自動無効化 (= CSV 更新 → relay 再起動だけで反映)
+  await ensureRelayCacheConsistency(settings);
 
   // キャッシュ参照
   const resolved: Record<string, RecipientInfo> = {};

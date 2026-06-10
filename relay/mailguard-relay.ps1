@@ -33,6 +33,9 @@ $ErrorActionPreference = 'Stop'
 # 出力を UTF-8 に
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
+# 起動時刻 (= ブラウザのキャッシュ自動無効化に使用。relay 再起動を ブラウザが検知できる)
+$script:RelayStartedAt = [DateTime]::UtcNow.ToString('o')
+
 # TLS 1.2 を有効化 (= PS 5.1 デフォルトでは 1.0 まで)
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
@@ -862,6 +865,9 @@ function Handle-Request {
             fallbackProvider   = if ($fallbackProvider) { $fallbackProvider } else { $null }
             fallbackUpstream   = if ($fallbackUpstream) { $fallbackUpstream } else { $null }
             hasFallbackApiKey  = [bool]$fallbackApiKey
+            startedAt          = $script:RelayStartedAt
+            mlCsvCount         = $script:MlCsvIndex.Keys.Count
+            mlCsvFolder        = $script:MlCsvFolderResolved
         }
         Send-Json -Response $res -StatusCode 200 -Body ($info | ConvertTo-Json -Depth 10 -Compress)
         return
